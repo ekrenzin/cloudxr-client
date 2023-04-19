@@ -1,3 +1,11 @@
+def passwordProperties = new Properties()
+def passwordPropertiesFile = rootProject.file('app/passwords.properties')
+if (passwordPropertiesFile.exists()) {
+    passwordPropertiesFile.withReader('UTF-8') { reader -> passwordProperties.load(reader) }
+}
+
+def keystorePassword = passwordProperties.getProperty('keystorePassword')
+
 apply plugin: 'com.android.application'
 apply from: "$projectDir/build_sdk.gradle"
 
@@ -22,10 +30,10 @@ android {
 
     signingConfigs {
         release {
-            storeFile file('./dummy.jks')
-            storePassword 'nvidia'
-            keyAlias 'nvidia'
-            keyPassword 'nvidia'
+            storeFile file('./keystore.jks')
+            storePassword keystorePassword
+            keyAlias 'key0'
+            keyPassword keystorePassword
         }
     }
 
