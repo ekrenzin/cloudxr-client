@@ -1248,7 +1248,7 @@ cxrDeviceDesc CloudXRClientOVR::GetDeviceDesc(float fovX, float fovY)
     desc.receiveAudio = GOptions.mReceiveAudio;
     desc.sendAudio = GOptions.mSendAudio;
     desc.posePollFreq = 0;
-    desc.disablePosePrediction = false;
+    desc.disablePosePrediction = true;
     desc.angularVelocityInDeviceSpace = false;
     desc.foveatedScaleFactor = (GOptions.mFoveation < 100) ? GOptions.mFoveation : 0;
     // if we have touch controller use Oculus type, else use Vive as more close to 3dof remotes
