@@ -33,6 +33,7 @@
             android:name=".ConfigActivity"
             android:exported="true"
             android:label="@string/title_activity_config"
+            android:taskAffinity=".config"
             android:theme="@style/Theme.Cloudxrclient">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -57,6 +58,7 @@
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="landscape"
+            android:taskAffinity=".main"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
 
             <!-- Tell NativeActivity the name of the .so -->
