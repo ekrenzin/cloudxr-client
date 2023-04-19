@@ -2,12 +2,11 @@ apply plugin: 'com.android.application'
 apply from: "$projectDir/build_sdk.gradle"
 
 dependencies {
-  compile 'com.android.support:support-v4:28.0.0'
+  implementation 'com.android.support:support-v4:28.0.0'
 }
 
 android {
-    buildToolsVersion '28.0.3'
-    ndkVersion '21.4.7075529' // current LTS atm
+    ndkVersion '24.0.8215888' // supports Apple Silicon
 
     compileSdkVersion 28
     defaultConfig {
@@ -43,7 +42,8 @@ android {
         }
     }
 
-    lintOptions {
+    namespace 'com.valiventures.cloudxr.ovr'
+    lint {
         abortOnError false
     }
 }

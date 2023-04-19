@@ -44,8 +44,8 @@ repositories {
 }
 
 dependencies {
-    compile fileTree(include: ['*.jar'], dir: 'libs')
-    compile "com.nvidia.CloudXRClient:CloudXR@aar"
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "com.nvidia.CloudXRClient:CloudXR@aar"
 }
 
 
