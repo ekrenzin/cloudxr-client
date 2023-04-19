@@ -28,8 +28,8 @@ import android.os.Bundle;
 import android.util.Log;
 import android.content.pm.PackageManager;
 import android.Manifest;
-import android.support.v4.app.ActivityCompat;
-import android.support.v4.content.ContextCompat;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 
 public class MainActivity extends android.app.NativeActivity {
     public static final String TAG = "CloudXR";

@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-		package="com.valiventures.cloudxr.ovr"
-		android:versionCode="20"
+    android:versionCode="20"
 		android:versionName="2.0"
 		android:installLocation="auto" >
 
@@ -35,7 +34,8 @@
 				android:label="@string/app_name"
 				android:launchMode="singleTask"
 				android:screenOrientation="landscape"
-				android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode">
+				android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
+			android:exported="true">
 			<!-- Tell NativeActivity the name of the .so -->
 			<meta-data android:name="android.app.lib_name" android:value="CloudXRClientOVR" />
 			<meta-data android:name="com.oculus.ossplash" android:value="true"/>
