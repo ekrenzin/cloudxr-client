@@ -58,7 +58,7 @@ tasks.register('extractOVRSDK', Copy) {
 
 // Extract the Oboe SDK
 tasks.register('extractOboeSDK', Copy) {
-    def sourceFile = file("${projectDir}/libs/oboe-1.5.0.aar")
+    def sourceFile = file("${projectDir}/libs/oboe.aar")
     from zipTree(sourceFile)
     into OBOE_SDK_ROOT
 }
