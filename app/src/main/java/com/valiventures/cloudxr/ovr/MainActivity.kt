@@ -32,7 +32,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 
 class MainActivity : NativeActivity() {
-    private val PERMISSION_REQUEST_CODE = 1
+    private val permissionRequestCode = 1
     override fun onCreate(savedInstanceState: Bundle?) {
         // do super first, as that sets up some native things.
         super.onCreate(savedInstanceState)
@@ -55,7 +55,7 @@ class MainActivity : NativeActivity() {
                 this, arrayOf(
                     Manifest.permission.WRITE_EXTERNAL_STORAGE,
                     Manifest.permission.RECORD_AUDIO
-                ), PERMISSION_REQUEST_CODE
+                ), permissionRequestCode
             )
             Log.w(TAG, "Waiting for permissions from user...")
         } else {
@@ -101,7 +101,7 @@ class MainActivity : NativeActivity() {
         permissions: Array<String>,
         grantResults: IntArray
     ) {
-        if (requestCode == PERMISSION_REQUEST_CODE && grantResults != null && grantResults.size > 0) {
+        if (requestCode == permissionRequestCode && grantResults.isNotEmpty()) {
             if (grantResults[0] != PackageManager.PERMISSION_GRANTED) {
                 Log.e(
                     TAG,
