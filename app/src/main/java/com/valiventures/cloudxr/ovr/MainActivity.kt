@@ -43,18 +43,14 @@ class MainActivity : NativeActivity() {
         // check for permission for any 'dangerous' class features.
         // Note that INTERNET is normal and pre-granted, and READ_EXTERNAL is implicitly granted when accepting WRITE.
         if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE
-            ) != PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
+                this, Manifest.permission.WRITE_EXTERNAL_STORAGE
+            ) != PackageManager.PERMISSION_GRANTED || ContextCompat.checkSelfPermission(
+                this, Manifest.permission.RECORD_AUDIO
             ) != PackageManager.PERMISSION_GRANTED
         ) {
             ActivityCompat.requestPermissions(
                 this, arrayOf(
-                    Manifest.permission.WRITE_EXTERNAL_STORAGE,
-                    Manifest.permission.RECORD_AUDIO
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.RECORD_AUDIO
                 ), permissionRequestCode
             )
             Log.w(TAG, "Waiting for permissions from user...")
@@ -97,9 +93,7 @@ class MainActivity : NativeActivity() {
     }
 
     override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<String>,
-        grantResults: IntArray
+        requestCode: Int, permissions: Array<String>, grantResults: IntArray
     ) {
         if (requestCode == permissionRequestCode && grantResults.isNotEmpty()) {
             if (grantResults[0] != PackageManager.PERMISSION_GRANTED) {
@@ -136,6 +130,7 @@ class MainActivity : NativeActivity() {
             System.loadLibrary("CloudXRClientOVR")
         }
 
-        @JvmStatic external fun nativeHandleLaunchOptions(jcmdline: String?)
+        @JvmStatic
+        external fun nativeHandleLaunchOptions(jcmdline: String?)
     }
 }
