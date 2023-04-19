@@ -59,7 +59,7 @@ class MainActivity : NativeActivity() {
         }
     }
 
-    protected fun doResume() {
+    private fun doResume() {
         didResume = true
 
         // Get the IP value from the intent's data
