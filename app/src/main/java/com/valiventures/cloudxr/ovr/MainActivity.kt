@@ -32,7 +32,6 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 
 class MainActivity : NativeActivity() {
-    private val permissionRequestCode = 1
     override fun onCreate(savedInstanceState: Bundle?) {
         // do super first, as that sets up some native things.
         super.onCreate(savedInstanceState)
@@ -51,7 +50,7 @@ class MainActivity : NativeActivity() {
             ActivityCompat.requestPermissions(
                 this, arrayOf(
                     Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.RECORD_AUDIO
-                ), permissionRequestCode
+                ), PERMISSION_REQUEST_CODE
             )
             Log.w(TAG, "Waiting for permissions from user...")
         } else {
@@ -63,23 +62,18 @@ class MainActivity : NativeActivity() {
         didResume = true
 
         // Get the IP value from the intent's data
-        var ip: String? = null
-        val intent = intent
-        val data = intent.data
-        if (data != null) {
-            ip = data.getQueryParameter("ip")
-        }
+        val ip = intent.data?.getQueryParameter("ip")
         if (ip != null) {
             //intent data exists
             nativeHandleLaunchOptions("-rrr 90 -f 50 -sa -s $ip")
         } else {
             // Do something else if there is no intent data
-            val newIntent = Intent("com.oculus.vrshell.intent.action.LAUNCH")
-            newIntent.setPackage("com.oculus.vrshell")
-            val url = "https://desktop.vision/app/#/xr?appid=100&xr=true"
-            newIntent.putExtra("uri", "ovrweb://webtask?uri=" + Uri.encode(url))
-            newIntent.putExtra("intent_data", Uri.parse("systemux://browser"))
-            this.sendBroadcast(newIntent)
+            val newIntent = Intent("com.oculus.vrshell.intent.action.LAUNCH").apply {
+                setPackage("com.oculus.vrshell")
+                putExtra("uri", "ovrweb://webtask?uri=" + Uri.encode(launchUrl))
+                putExtra("intent_data", Uri.parse("systemux://browser"))
+            }
+            sendBroadcast(newIntent)
             // Close the app after broadcasting the intent
             finish()
         }
@@ -95,7 +89,7 @@ class MainActivity : NativeActivity() {
     override fun onRequestPermissionsResult(
         requestCode: Int, permissions: Array<String>, grantResults: IntArray
     ) {
-        if (requestCode == permissionRequestCode && grantResults.isNotEmpty()) {
+        if (requestCode == PERMISSION_REQUEST_CODE && grantResults.isNotEmpty()) {
             if (grantResults[0] != PackageManager.PERMISSION_GRANTED) {
                 Log.e(
                     TAG,
@@ -119,7 +113,9 @@ class MainActivity : NativeActivity() {
     }
 
     companion object {
-        const val TAG = "CloudXR"
+        private const val TAG = "CloudXR"
+        private const val PERMISSION_REQUEST_CODE = 1
+        private const val launchUrl = "https://desktop.vision/app/#/xr?appid=100&xr=true"
         private var cmdlineOptions: String? = ""
         private var resumeReady = false
         private var permissionDone = false
