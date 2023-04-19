@@ -18,6 +18,7 @@ jobs:
         echo ${{ secrets.RELEASE_KEYSTORE_PASSWORD }} | base64 -d > app/passwords.properties
     - uses: actions/setup-java@v3
       with:
+        distribution: 'zulu'
         java-version: 17
     - name: Build with Gradle
       run: ./gradlew assembleRelease
