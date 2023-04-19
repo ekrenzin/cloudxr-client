@@ -16,6 +16,8 @@ jobs:
       run: |
         echo ${{ secrets.RELEASE_KEYSTORE }} | base64 -d > app/release.keystore
         echo ${{ secrets.RELEASE_KEYSTORE_PASSWORD }} | base64 -d > app/passwords.properties
+    - name: Get libs
+      run: ./get-libs.sh
     - uses: actions/setup-java@v3
       with:
         distribution: 'zulu'
