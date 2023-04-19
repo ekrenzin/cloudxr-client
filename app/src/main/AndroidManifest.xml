@@ -11,13 +11,16 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
-    <uses-feature android:name="android.hardware.usb.host" /> <!-- Tell the system this app requires OpenGL ES 3.1. -->
+    <uses-feature android:name="android.hardware.usb.host" />
+    <!-- Tell the system this app requires OpenGL ES 3.1. -->
     <uses-feature
         android:glEsVersion="0x00030001"
-        android:required="true" /> <!-- Tell the system this app works in either 3dof or 6dof mode -->
+        android:required="true" />
+    <!-- Tell the system this app works in either 3dof or 6dof mode -->
     <uses-feature
         android:name="android.hardware.vr.headtracking"
-        android:required="false" /> <!-- Tell the system this app uses the microphone -->
+        android:required="false" />
+    <!-- Tell the system this app uses the microphone -->
     <uses-feature
         android:name="android.hardware.microphone"
         android:required="false" />
@@ -43,7 +46,8 @@
             android:value="vr_only" />
         <meta-data
             android:name="com.oculus.supportedDevices"
-            android:value="quest|quest2" /> <!-- launchMode is set to singleTask because there should never be multiple copies of the app running -->
+            android:value="quest|quest2" />
+        <!-- launchMode is set to singleTask because there should never be multiple copies of the app running -->
         <!-- Theme.Black.NoTitleBar.Fullscreen gives solid black instead of a (bad stereoscopic) gradient on app transition -->
         <!-- If targeting API level 24+, configChanges should additionally include 'density'. -->
         <!-- If targeting API level 24+, android:resizeableActivity="false" should be added. -->
