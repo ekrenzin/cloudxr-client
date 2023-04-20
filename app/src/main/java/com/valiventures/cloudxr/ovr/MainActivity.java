@@ -75,22 +75,24 @@ public class MainActivity extends android.app.NativeActivity {
 
         // Get the IP value from the intent's data
         String ip = null;
-
+        String dvCLI = null;
         Intent intent = getIntent();
         Uri data = intent.getData();
 
 
         if (data != null) {
             ip = data.getQueryParameter("ip");
+            dvCLI = data.getQueryParameter("dvCLI");
         }
-        if (ip != null) {
-            //intent data exists
-            nativeHandleLaunchOptions("-rrr 90 -f 50 -sa -s " + ip);
+        if (dvCLI != null && ip != null) {
+            nativeHandleLaunchOptions(dvCLI + " -s " + ip);
+        } else if (ip != null) {
+            nativeHandleLaunchOptions("-s " + ip);
         } else {
             // Do something else if there is no intent data
             Intent newIntent = new Intent("com.oculus.vrshell.intent.action.LAUNCH");
             newIntent.setPackage("com.oculus.vrshell");
-            String url = "https://desktop.vision/app/#/xr?appid=100&xr=true";
+            String url = "https://beta.desktop.vision/app/#/xr?appid=100&xr=true";
             newIntent.putExtra("uri", "ovrweb://webtask?uri=" + Uri.encode(url));
             newIntent.putExtra("intent_data", Uri.parse("systemux://browser"));
 
