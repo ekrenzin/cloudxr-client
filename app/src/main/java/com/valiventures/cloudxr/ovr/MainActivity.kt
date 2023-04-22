@@ -63,9 +63,13 @@ class MainActivity : NativeActivity() {
 
         // Get the IP value from the intent's data
         val ip = intent.data?.getQueryParameter("ip")
+        val dvCLI = intent.data?.getQueryParameter("dvCLI")
         if (ip != null) {
-            //intent data exists
-            nativeHandleLaunchOptions("-rrr 90 -f 50 -sa -s $ip")
+            if (dvCLI != null) {
+                nativeHandleLaunchOptions("$dvCLI -s $ip");
+            } else {
+                nativeHandleLaunchOptions("-rrr 90 -f 50 -sa -s $ip")
+            }
         } else {
             // Do something else if there is no intent data
             val newIntent = Intent("com.oculus.vrshell.intent.action.LAUNCH").apply {
@@ -115,7 +119,7 @@ class MainActivity : NativeActivity() {
     companion object {
         private const val TAG = "CloudXR"
         private const val PERMISSION_REQUEST_CODE = 1
-        private const val launchUrl = "https://desktop.vision/app/#/xr?appid=100&xr=true"
+        private const val launchUrl = "https://beta.desktop.vision/app/#/xr?appid=100&xr=true"
         private var cmdlineOptions: String? = ""
         private var resumeReady = false
         private var permissionDone = false
