@@ -23,7 +23,7 @@
     <!-- Tell the system this app uses the microphone -->
     <uses-feature
         android:name="android.hardware.microphone"
-        android:required="false" />
+        android:required="true" />
     <application
         android:allowBackup="false"
         android:icon="@drawable/dv_logo"
