@@ -20,6 +20,7 @@ LOCAL_C_INCLUDES := $(OVR_SDK_ROOT)/1stParty/OVR/Include \
                     $(OVR_SDK_ROOT)/1stParty/utilities/include \
                     $(OVR_SDK_ROOT)/3rdParty/stb/src \
                     $(OBOE_SDK_ROOT)/prefab/modules/oboe/include \
+                    $(GLM_ROOT)/glm \
                     $(C_SHARED_INCLUDE) \
                     $(CLOUDXR_SDK_ROOT)/include \
                     ../src
