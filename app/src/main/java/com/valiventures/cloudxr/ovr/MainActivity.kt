@@ -119,7 +119,7 @@ class MainActivity : NativeActivity() {
     companion object {
         private const val TAG = "CloudXR"
         private const val PERMISSION_REQUEST_CODE = 1
-        private const val launchUrl = "https://beta.desktop.vision/app/#/xr?appid=100&xr=true"
+        private const val launchUrl = "https://desktop.vision/app/#/xr?appid=100&xr=true"
         private var cmdlineOptions: String? = ""
         private var resumeReady = false
         private var permissionDone = false
