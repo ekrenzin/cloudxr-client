@@ -912,6 +912,13 @@ void CloudXRClientOVR::ProcessControllers(float predictedTimeS)
             controller.pose.deviceIsConnected = cxrTrue;
             controller.pose.trackingResult = cxrTrackingResult_Running_OK;
 
+            // Obtain the forward vector of the controller
+            glm::quat rotation = controller.pose.rotation;
+            glm::vec3 forward = glm::rotate(rotation, glm::vec3(0.0f, 0.0f, -1.0f));
+            // Move the object backward by subtracting 5cm from the z component of the position vector
+            glm::vec3 position = controller.pose.position;
+            position -= 0.05f * forward;
+
             // stash current state of booleanComps, to evaluate at end of fn for changes
             // in state this frame.
             const uint64_t priorCompsState = controller.booleanComps;
