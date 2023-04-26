@@ -912,12 +912,29 @@ void CloudXRClientOVR::ProcessControllers(float predictedTimeS)
             controller.pose.deviceIsConnected = cxrTrue;
             controller.pose.trackingResult = cxrTrackingResult_Running_OK;
 
-            // Obtain the forward vector of the controller
-            glm::quat rotation = controller.pose.rotation;
-            glm::vec3 forward = glm::rotate(rotation, glm::vec3(0.0f, 0.0f, -1.0f));
-            // Move the object backward by subtracting 5cm from the z component of the position vector
-            glm::vec3 position = controller.pose.position;
-            position -= 0.05f * forward;
+            // Get the controller pose and convert the pose to glm types
+            glm::vec3 position(controller.pose.position.v[0], controller.pose.position.v[1], -controller.pose.position.v[2]); // Negate z-axis to convert from right-handed (CloudXR) to left-handed (OpenGL) coordinate system
+            glm::quat rotation(controller.pose.rotation.w, controller.pose.rotation.x, controller.pose.rotation.y, controller.pose.rotation.z);
+
+            // Calculate the offset direction in the local coordinate system of the controller
+            glm::vec3 offset(0.0f, 0.0f, -0.05f); // Move 5cm forward on the z-axis
+            glm::vec3 localOffset = rotation * offset;
+
+            // Calculate the final position by adding the offset to the controller position
+            glm::vec3 finalPosition = position + localOffset;
+
+            // Calculate the final rotation by multiplying the controller rotation by the offset rotation
+            glm::quat offsetRotation = glm::angleAxis(glm::radians(0.0f), glm::vec3(0.0f, 1.0f, 0.0f)); // No rotation
+            glm::quat finalRotation = rotation * offsetRotation;
+
+            // Set the new pose of the controller
+            controller.pose.position.v[0] = finalPosition.x;
+            controller.pose.position.v[1] = finalPosition.y;
+            controller.pose.position.v[2] = -finalPosition.z; // Negate z-axis to convert back to right-handed coordinate system
+            controller.pose.rotation.w = finalRotation.w;
+            controller.pose.rotation.x = finalRotation.x;
+            controller.pose.rotation.y = finalRotation.y;
+            controller.pose.rotation.z = finalRotation.z;
 
             // stash current state of booleanComps, to evaluate at end of fn for changes
             // in state this frame.
