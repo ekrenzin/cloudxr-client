@@ -1,17 +1,21 @@
 def OVR_SDK_ROOT = file("${buildDir}/ovr_sdk")
 def OBOE_SDK_ROOT = file("${buildDir}/Oboe")
 def CLOUDXR_SDK_ROOT = file("${buildDir}/CloudXR")
+def GLM_ROOT = file("${buildDir}/glm")
 def C_SHARED_INCLUDE = file("${project.rootDir}/../../shared")
 
 android {
     defaultConfig {
-        externalNativeBuild { ndkBuild {
-            arguments "OVR_SDK_ROOT=${OVR_SDK_ROOT}"
-            arguments "OBOE_SDK_ROOT=${OBOE_SDK_ROOT}"
-            arguments "CLOUDXR_SDK_ROOT=${CLOUDXR_SDK_ROOT}"
-            arguments "C_SHARED_INCLUDE=${C_SHARED_INCLUDE}"
-            arguments '-j4'
-        }}
+        externalNativeBuild {
+            ndkBuild {
+                arguments "OVR_SDK_ROOT=${OVR_SDK_ROOT}"
+                arguments "OBOE_SDK_ROOT=${OBOE_SDK_ROOT}"
+                arguments "CLOUDXR_SDK_ROOT=${CLOUDXR_SDK_ROOT}"
+                arguments "GLM_ROOT=${GLM_ROOT}"
+                arguments "C_SHARED_INCLUDE=${C_SHARED_INCLUDE}"
+                arguments '-j4'
+            }
+        }
         ndk {
             abiFilters 'arm64-v8a'
         }
@@ -25,20 +29,24 @@ android {
 
     buildTypes {
         release {
-            externalNativeBuild { ndkBuild {
-                arguments "NDK_DEBUG=0"
-            }}
+            externalNativeBuild {
+                ndkBuild {
+                    arguments "NDK_DEBUG=0"
+                }
+            }
         }
         debug {
-            externalNativeBuild { ndkBuild {
-                arguments "NDK_DEBUG=1"
-            }}
+            externalNativeBuild {
+                ndkBuild {
+                    arguments "NDK_DEBUG=1"
+                }
+            }
         }
     }
 }
 
 repositories {
-    flatDir{
+    flatDir {
         dirs 'libs'
     }
 }
@@ -70,6 +78,14 @@ tasks.register('extractCloudXRSDK', Copy) {
     into CLOUDXR_SDK_ROOT
 }
 
+// Extract the GLM dependency
+tasks.register('extractGLM', Copy) {
+    def sourceFile = file("${projectDir}/libs/glm.zip")
+    from zipTree(sourceFile)
+    into GLM_ROOT
+}
+
 preBuild.dependsOn(extractOVRSDK)
 preBuild.dependsOn(extractOboeSDK)
 preBuild.dependsOn(extractCloudXRSDK)
+preBuild.dependsOn(extractGLM)

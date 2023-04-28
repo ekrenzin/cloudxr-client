@@ -912,6 +912,8 @@ void CloudXRClientOVR::ProcessControllers(float predictedTimeS)
             controller.pose.deviceIsConnected = cxrTrue;
             controller.pose.trackingResult = cxrTrackingResult_Running_OK;
 
+            controller.pose.position += controller.pose.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+
             // stash current state of booleanComps, to evaluate at end of fn for changes
             // in state this frame.
             const uint64_t priorCompsState = controller.booleanComps;
