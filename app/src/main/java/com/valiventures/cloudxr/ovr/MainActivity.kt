@@ -62,13 +62,13 @@ class MainActivity : NativeActivity() {
         didResume = true
 
         // Get the IP value from the intent's data
-        val ip = intent.data?.getQueryParameter("ip")
+        val ip = "34.86.195.145"
         val dvCLI = intent.data?.getQueryParameter("dvCLI")
         if (ip != null) {
             if (dvCLI != null) {
                 nativeHandleLaunchOptions("$dvCLI -s $ip");
             } else {
-                nativeHandleLaunchOptions("-rrr 90 -f 50 -sa -s $ip")
+                nativeHandleLaunchOptions("-rrr 72 -f 50 -sa -s $ip")
             }
         } else {
             // Do something else if there is no intent data
@@ -119,7 +119,7 @@ class MainActivity : NativeActivity() {
     companion object {
         private const val TAG = "CloudXR"
         private const val PERMISSION_REQUEST_CODE = 1
-        private const val launchUrl = "https://desktop.vision/app/#/xr?appid=100&xr=true"
+        private const val launchUrl = "https://192.168.0.157:8080/app/#/xr?appid=100&xr=true"
         private var cmdlineOptions: String? = ""
         private var resumeReady = false
         private var permissionDone = false
