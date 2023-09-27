@@ -30,7 +30,8 @@ import android.os.Bundle
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-
+import android.os.Handler
+import android.os.Looper
 class MainActivity : NativeActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         // do super first, as that sets up some native things.
@@ -58,38 +59,51 @@ class MainActivity : NativeActivity() {
         }
     }
 
-    private fun doResume() {
-        didResume = true
 
-        // Get the IP value from the intent's data
-        val ip = intent.data?.getQueryParameter("ip")
-        val dvCLI = intent.data?.getQueryParameter("dvCLI")
-        if (ip != null) {
-            if (dvCLI != null) {
-                nativeHandleLaunchOptions("$dvCLI -s $ip");
-            } else {
-                nativeHandleLaunchOptions("-rrr 90 -f 50 -sa -s $ip")
-            }
+    private fun handleXR(intentData: Intent? = intent) {
+        val ip = intentData?.data?.getQueryParameter("ip")
+        val dvCLI = intentData?.data?.getQueryParameter("dvCLI")
+        Log.d(TAG, "cxr ip: $ip")
+        if (ip == null) {
+            launchBrowser()
         } else {
-            // Do something else if there is no intent data
+            handleNativeOptions(ip, dvCLI)
+        }
+    }
+
+    private fun launchBrowser() {
+        Log.d(TAG, "cxr launchBrowser()")
+
+        // Delay logic using Handler
+        Handler(Looper.getMainLooper()).postDelayed({
             val newIntent = Intent("com.oculus.vrshell.intent.action.LAUNCH").apply {
                 setPackage("com.oculus.vrshell")
                 putExtra("uri", "ovrweb://webtask?uri=" + Uri.encode(launchUrl))
                 putExtra("intent_data", Uri.parse("systemux://browser"))
             }
             sendBroadcast(newIntent)
-            // Close the app after broadcasting the intent
-            finish()
+        }, 1000)
+    }
+    private fun handleNativeOptions(ip: String?, dvCLI: String?) {
+        Log.d(TAG, "cxr handleNativeOptions()")
+        Log.d(TAG, "cxr ip: $ip")
+        Log.d(TAG, "cxr dvCLI: $dvCLI")
+        if (dvCLI != null) {
+            nativeHandleLaunchOptions("$dvCLI -s $ip");
+        } else {
+            nativeHandleLaunchOptions("-rrr 90 -f 50 -sa -s $ip")
         }
     }
 
     override fun onResume() {
-        Log.d(TAG, "$this onResume()")
         super.onResume()
-        resumeReady = true
         if (permissionDone && !didResume) doResume()
     }
-
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        Log.d(TAG, "cxr $this onNewIntent()")
+        handleXR(intent)
+    }
     override fun onRequestPermissionsResult(
         requestCode: Int, permissions: Array<String>, grantResults: IntArray
     ) {
@@ -116,6 +130,10 @@ class MainActivity : NativeActivity() {
         if (!didResume && resumeReady) doResume()
     }
 
+    private fun doResume() {
+        didResume = true
+        handleXR(intent)
+    }
     companion object {
         private const val TAG = "CloudXR"
         private const val PERMISSION_REQUEST_CODE = 1
@@ -124,6 +142,8 @@ class MainActivity : NativeActivity() {
         private var resumeReady = false
         private var permissionDone = false
         private var didResume = false
+        private const val REQUEST_CODE = 1001
+
 
         init {
             System.loadLibrary("vrapi")

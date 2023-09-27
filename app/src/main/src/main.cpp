@@ -312,7 +312,7 @@ cxrError CloudXRClientOVR::Release()
     // if we somehow still have session, release it now so we don't block display.
     if (mOvrSession != NULL)
     {
-        ALOGV("CALLING vrapi_LeaveVrMode()");
+        ALOGV("RELEASE CALLING vrapi_LeaveVrMode()");
         vrapi_LeaveVrMode(mOvrSession);
         mOvrSession = NULL;
     }
@@ -1732,7 +1732,7 @@ void CloudXRClientOVR::HandleVrModeChanges()
         {
             if (mOvrSession != NULL)
             {
-                ALOGV("CALLING vrapi_LeaveVrMode()");
+                ALOGV("HANDLE VR MODE CHANGES CALLING vrapi_LeaveVrMode()");
                 vrapi_LeaveVrMode(mOvrSession);
                 mOvrSession = NULL;
             }
