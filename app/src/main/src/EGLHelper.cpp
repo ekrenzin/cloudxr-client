@@ -23,7 +23,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include "EGLHelper.h"
-#include "log.h"
+
+#define LOG_TAG "EGLHelper"
+#include "CloudXRLog.h"
 
 //-----------------------------------------------------------------------------
 // static member variables..
@@ -44,14 +46,14 @@ bool EGLHelper::Initialize()
     EGLHelper::HelperEGLConfig questConfig(8, 8, 8, 8, 0, 0, 0, EGL_OPENGL_ES3_BIT);
     if (!ChooseConfig(display, questConfig, bestConfig))
     {
-        ALOGE("EGLHelper failed to choose a display config!");
+        CXR_LOGE("EGLHelper failed to choose a display config!");
         return false;
     }
 
     EGLint format;
     if (!eglGetConfigAttrib(display, bestConfig, EGL_NATIVE_VISUAL_ID, &format))
     {
-        ALOGE("EGLHelper failed to get native visual format!");
+        CXR_LOGE("EGLHelper failed to get native visual format!");
         return false;
     }
 
@@ -64,7 +66,7 @@ bool EGLHelper::Initialize()
     EGLContext context = eglCreateContext(display, bestConfig, EGL_NO_CONTEXT, contextAttrs);
     if (context == nullptr)
     {
-        ALOGE("EGLHelper: CreateContext failed.");
+        CXR_LOGE("EGLHelper: CreateContext failed.");
         return false; // early exit, nothing to clean up.
     }
 
@@ -82,12 +84,12 @@ bool EGLHelper::Initialize()
     const EGLSurface surface = eglCreatePbufferSurface(display, bestConfig, pbufferAttrs);
     if (surface == nullptr)
     {
-        ALOGE("EGLHelper unable to create pbuffer surface");
+        CXR_LOGE("EGLHelper unable to create pbuffer surface");
         eglDestroyContext(display, context);
         return false;
     }
 
-    ALOGV("EGLHelper using pbuffer context");
+    CXR_LOGV("EGLHelper using pbuffer context");
     mSurface = (Handle) surface;
 
     MakeCurrent();
@@ -143,15 +145,15 @@ bool EGLHelper::ChooseConfig(EGLDisplay disp, const struct HelperEGLConfig &want
     EGLint count = 0;
     if (!eglGetConfigs(disp, NULL, 0, &count))
     {
-        ALOGE("ChooseConfig cannot query count of all configs");
+        CXR_LOGE("ChooseConfig cannot query count of all configs");
         return false;
     }
-    ALOGV("ChooseConfig EGL config count = %d", count);
+    CXR_LOGV("ChooseConfig EGL config count = %d", count);
 
     EGLConfig* configs = new EGLConfig[count];
     if (!eglGetConfigs(disp, configs, count, &count))
     {
-        ALOGE("ChooseConfig cannot query all configs");
+        CXR_LOGE("ChooseConfig cannot query all configs");
         return false;
     }
 
@@ -315,14 +317,14 @@ bool EGLHelper::ChooseConfig(EGLDisplay disp, const struct HelperEGLConfig &want
             penalty += MINOR_PENALTY * (alphaBits - wanted.alphaBits);
         }
 
-        ALOGV("Config[%d]: R%dG%dB%dA%d D%dS%d MSAA=%d  Type=%04x Render=%04x (penalties: %d)",
+        CXR_LOGV("Config[%d]: R%dG%dB%dA%d D%dS%d MSAA=%d  Type=%04x Render=%04x (penalties: %d)",
              i, redBits, greenBits, blueBits, alphaBits, depthBits, stencilBits, msaaSamples, surfaceType, renderableFlags, penalty);
 
         if ((penalty < bestMatch) || (bestIndex == -1))
         {
             bestMatch = penalty;
             bestIndex = i;
-            ALOGV("Config[%d] is the new best config", i);
+            CXR_LOGV("Config[%d] is the new best config", i);
         }
     }
 

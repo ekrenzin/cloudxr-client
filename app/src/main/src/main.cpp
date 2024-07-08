@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2021, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2019-2023, NVIDIA CORPORATION. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -21,7 +21,6 @@
  */
 
 #include "main.h"
-#include "log.h"
 
 #include <android/window.h>
 #include <android/native_window_jni.h>
@@ -30,21 +29,22 @@
 
 #include <linux/prctl.h>
 #include <sys/prctl.h>
+#include <sys/system_properties.h>
 
 #include "CloudXRClientOptions.h"
 #include "CloudXRMatrixHelpers.h"
 
-#include <android/log.h>
-#define TAG "CloudXR"
-#ifdef ALOGV
-#undef ALOGV
-#endif
-#ifdef ALOGE
-#undef ALOGE
-#endif
-#define ALOGV(...) __android_log_print(ANDROID_LOG_VERBOSE, TAG, __VA_ARGS__)
-#define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define LOG_TAG "OVR Client"
+#include "CloudXRLog.h"
 
+#include "CloudXRFileLogger.h"
+
+#include <string>
+#include <thread>
+#include <atomic>
+#include <condition_variable>
+#include <map>
+#include <vector>
 
 static struct android_app* GAndroidApp = NULL;
 static CloudXR::ClientOptions GOptions;
@@ -55,11 +55,39 @@ static CloudXRClientOVR *gClientHandle = NULL;
 static const int CPU_LEVEL = 1;
 static const int GPU_LEVEL = 1;
 
+// macro to switch between CloudXRFileLogger vs just direct android_log_print.
+#define LOG_TO_FILE 1
+
+//-----------------------------------------------------------------------------
+cxrClientCallbacks CloudXRClientOVR::s_clientProxy = { 0 };
+extern "C" void dispatchLogMsg(cxrLogLevel level, cxrMessageCategory category, void *extra, const char *tag, const char *fmt, ...)
+{
+    va_list aptr;
+    va_start(aptr, fmt);
+#if !LOG_TO_FILE
+    const int bufsize = 8192;
+    char buffer[bufsize];
+    vsnprintf(buffer, bufsize, fmt, aptr);
+    // throw to logcat.
+    __android_log_print(cxrLLToAndroidPriority(level), tag, "%s", buffer);
+#else
+    // throw to the log file
+    g_logFile.logva(level, tag, fmt, aptr);
+#endif
+    va_end(aptr);
+}
+
 
 static double GetTimeInSeconds() {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     return (now.tv_sec * 1e9 + now.tv_nsec) * 0.000000001;
+}
+
+static uint64_t GetTimeInNS() {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return ((uint64_t)(now.tv_sec * 1e9) + now.tv_nsec);
 }
 
 #define CASE(x) \
@@ -80,24 +108,6 @@ const char* ClientStateEnumToString(cxrClientState state)
             return "";
     }
 }
-
-const char* StateReasonEnumToString(cxrStateReason reason)
-{
-    switch (reason)
-    {
-        CASE(cxrStateReason_HEVCUnsupported);
-        CASE(cxrStateReason_VersionMismatch);
-        CASE(cxrStateReason_DisabledFeature);
-        CASE(cxrStateReason_RTSPCannotConnect);
-        CASE(cxrStateReason_HolePunchFailed);
-        CASE(cxrStateReason_NetworkError);
-        CASE(cxrStateReason_AuthorizationFailed);
-        CASE(cxrStateReason_DisconnectedExpected);
-        CASE(cxrStateReason_DisconnectedUnexpected);
-        default:
-            return "";
-    }
-}
 #undef CASE
 
 //==============================================================
@@ -108,38 +118,38 @@ void android_handle_cmd(struct android_app* app, int32_t cmd) {
     if (cxrc == nullptr) {
         // TODO: shouldn't hit this case, but if we do we need to likely
         //  log and exit. TBD.
-        ALOGE("android_handle_cmd called with null userData");
+        CXR_LOGE("android_handle_cmd called with null userData");
         return;
     }
 
     switch (cmd) {
         // TODO: handle gained/lost focus events
         case APP_CMD_START:
-            ALOGV("APP_CMD_START");
+            CXR_LOGI("APP_CMD_START");
             break;
         case APP_CMD_RESUME:
-            ALOGV("APP_CMD_RESUME");
+            CXR_LOGI("APP_CMD_RESUME");
             cxrc->SetPaused(false);
             break;
         case APP_CMD_PAUSE:
-            ALOGV("APP_CMD_PAUSE");
+            CXR_LOGI("APP_CMD_PAUSE");
             cxrc->SetPaused(true);
             break;
         case APP_CMD_STOP:
             // TODO - may need to handle this
-            ALOGV("APP_CMD_STOP");
+            CXR_LOGI("APP_CMD_STOP");
             break;
         case APP_CMD_DESTROY:
             // TODO - may need to do more here
-            ALOGV("APP_CMD_DESTROY");
+            CXR_LOGI("APP_CMD_DESTROY");
             cxrc->SetWindow(nullptr);
             break;
         case APP_CMD_INIT_WINDOW:
-            ALOGV("APP_CMD_INIT_WINDOW");
+            CXR_LOGI("APP_CMD_INIT_WINDOW");
             cxrc->SetWindow(app->window);
             break;
         case APP_CMD_TERM_WINDOW:
-            ALOGV("APP_TERM_WINDOW");
+            CXR_LOGI("APP_TERM_WINDOW");
             cxrc->SetWindow(nullptr);
             break;
     }
@@ -151,7 +161,7 @@ void android_handle_cmd(struct android_app* app, int32_t cmd) {
 int32_t android_handle_input(struct android_app* app, AInputEvent* event) {
     CloudXRClientOVR* cxrc = (CloudXRClientOVR*)app->userData;
     if (app == nullptr) {
-        ALOGE("android_handle_input called with null userData");
+        CXR_LOGE("android_handle_input called with null userData");
         return 0;
     }
 
@@ -259,6 +269,10 @@ CloudXRClientOVR::CloudXRClientOVR(struct android_app* app)
     mIsPaused = mWasPaused = true;
 
     mAndroidApp = app; // cache and hang onto it.
+    // we want the EXTERNAL path, as that maps to /sdcard, and is what shows on PC.
+    mAppBasePath = mAndroidApp->activity->externalDataPath;
+    mAppOutputPath = mAppBasePath + "/logs/";
+    CXR_LOGI("Android external data path is %s", mAppBasePath.c_str());
 
     mJavaCtx.Vm = app->activity->vm;
     mJavaCtx.Vm->AttachCurrentThread(&mJavaCtx.Env, NULL);
@@ -273,31 +287,36 @@ CloudXRClientOVR::CloudXRClientOVR(struct android_app* app)
 //-----------------------------------------------------------------------------
 cxrError CloudXRClientOVR::Initialize()
 {
-    ALOGV("!!> Initialize START");
+    CXR_LOGV("CloudXRClientOVR::Initialize START");
 
     int32_t result = VRAPI_INITIALIZE_SUCCESS;
     ovrInitParms localInitParms = vrapi_DefaultInitParms(&mJavaCtx);
-    ALOGV("!!> Initialize VrApi");
+    CXR_LOGV("Initialize VrApi");
     result = vrapi_Initialize(&localInitParms);
     if (result != VRAPI_INITIALIZE_SUCCESS)
     {
-        ALOGE("Init - failed to Initialize the VRAPI localInitParms=%p", &localInitParms);
+        CXR_LOGE("Init - failed to Initialize the VRAPI localInitParms=%p", &localInitParms);
         return cxrError_Module_Load_Failed;
     }
 
-    ALOGV("!!> Initialize EGL");
+    CXR_LOGV("Initialize EGL");
     if (!mEglHelper.Initialize())
     {
-        ALOGE("Init - failed to initialize EglHelper");
+        CXR_LOGE("Init - failed to initialize EglHelper");
         return cxrError_Failed;
     }
 
-    ALOGV("!!> Initialize set pointers");
     mAndroidApp->userData = this;
     mAndroidApp->onAppCmd = android_handle_cmd;
     mAndroidApp->onInputEvent = android_handle_input;
 
-    ALOGV("!!> Initialize END");
+    // demonstrate logging some device specific data...
+    char propStr[PROP_VALUE_MAX];
+    int proplen;
+    proplen = __system_property_get("ro.ovr.os.api.version", propStr);
+    CXR_LOGI("OVR API version is %s", propStr);
+
+    CXR_LOGV("Initialize END");
 
     return cxrError_Success;
 }
@@ -312,10 +331,11 @@ cxrError CloudXRClientOVR::Release()
     // if we somehow still have session, release it now so we don't block display.
     if (mOvrSession != NULL)
     {
-        ALOGV("RELEASE CALLING vrapi_LeaveVrMode()");
+        CXR_LOGI("CALLING vrapi_LeaveVrMode()");
         vrapi_LeaveVrMode(mOvrSession);
         mOvrSession = NULL;
     }
+    CXR_LOGI("CALLING vrapi_Shutdown()");
     vrapi_Shutdown();
 
     mJavaCtx.Vm->DetachCurrentThread();
@@ -331,6 +351,7 @@ cxrError CloudXRClientOVR::Release()
 //-----------------------------------------------------------------------------
 void CloudXRClientOVR::RequestExit()
 {
+    CXR_LOGI("Requesting application exit.");
     mClientState = cxrClientState_Exiting;
     mRenderState = RenderState_Exiting;
 }
@@ -351,7 +372,7 @@ void CloudXRClientOVR::UpdateClientState()
             case cxrClientState_ConnectionAttemptInProgress:
             { // status indication via log
                 static int32_t attemptCount = 0;
-                if (++attemptCount % 60 == 0) ALOGV("..... waiting for server connection .....");
+                if (++attemptCount % 60 == 0) CXR_LOGI("Waiting for server...");
                 break;
             }
 
@@ -361,6 +382,7 @@ void CloudXRClientOVR::UpdateClientState()
 
             case cxrClientState_ConnectionAttemptFailed:
             case cxrClientState_Disconnected:
+                CXR_LOGE("Exiting due to connection failure.");
                 // fall through to below common handling...
                 break;
 
@@ -438,13 +460,13 @@ cxrError CloudXRClientOVR::CreateReceiver()
 
     if (GOptions.mServerIP.empty())
     {
-        ALOGE("No CloudXR server address specified.");
-        return cxrError_No_Addr;
+        CXR_LOGE("No CloudXR server address specified.");
+        return cxrError_Required_Parameter;
     }
 
     if (mOvrSession == nullptr)
     {
-        ALOGE("OVR session is null, cannot continue.");
+        CXR_LOGE("OVR session is null, cannot continue.");
         return cxrError_Failed; // false..
     }
 
@@ -461,21 +483,21 @@ cxrError CloudXRClientOVR::CreateReceiver()
 
         oboe::Result r = playbackStreamBuilder.openStream(playbackStream);
         if (r != oboe::Result::OK) {
-            ALOGE("Failed to open playback stream. Error: %s", oboe::convertToText(r));
+            CXR_LOGE("Failed to open playback stream. Error: %s", oboe::convertToText(r));
             return cxrError_Failed;
         }
 
         int bufferSizeFrames = playbackStream->getFramesPerBurst() * 2;
         r = playbackStream->setBufferSizeInFrames(bufferSizeFrames);
         if (r != oboe::Result::OK) {
-            ALOGE("Failed to set playback stream buffer size to: %d. Error: %s",
+            CXR_LOGE("Failed to set playback stream buffer size to: %d. Error: %s",
                     bufferSizeFrames, oboe::convertToText(r));
             return cxrError_Failed;
         }
 
         r = playbackStream->start();
         if (r != oboe::Result::OK) {
-            ALOGE("Failed to start playback stream. Error: %s", oboe::convertToText(r));
+            CXR_LOGE("Failed to start playback stream. Error: %s", oboe::convertToText(r));
             return cxrError_Failed;
         }
     }
@@ -495,97 +517,102 @@ cxrError CloudXRClientOVR::CreateReceiver()
 
         oboe::Result r = recordingStreamBuilder.openStream(recordingStream);
         if (r != oboe::Result::OK) {
-            ALOGE("Failed to open recording stream. Error: %s", oboe::convertToText(r));
+            CXR_LOGE("Failed to open recording stream. Error: %s", oboe::convertToText(r));
             return cxrError_Failed;
         }
 
         r = recordingStream->start();
         if (r != oboe::Result::OK) {
-            ALOGE("Failed to start recording stream. Error: %s", oboe::convertToText(r));
+            CXR_LOGE("Failed to start recording stream. Error: %s", oboe::convertToText(r));
             return cxrError_Failed;
         }
     }
 
-    ALOGV("Trying to create Receiver at %s.", GOptions.mServerIP.c_str());
+    CXR_LOGI("Trying to create Receiver at %s.", GOptions.mServerIP.c_str());
     cxrGraphicsContext context{cxrGraphicsContext_GLES};
     context.egl.display = eglGetCurrentDisplay();
     context.egl.context = eglGetCurrentContext();
 
     if(context.egl.context == nullptr)
     {
-        ALOGV("Error, null context");
+        CXR_LOGE("Error, null EGL graphics context");
     }
 
-    cxrClientCallbacks clientProxy = { 0 };
-    clientProxy.GetTrackingState = [](void* context, cxrVRTrackingState* trackingState)
+    s_clientProxy.GetTrackingState = [](void* context, cxrVRTrackingState* trackingState)
     {
         return reinterpret_cast<CloudXRClientOVR*>(context)->GetTrackingState(trackingState);
     };
-    clientProxy.TriggerHaptic = [](void* context, const cxrHapticFeedback* haptic)
+    s_clientProxy.TriggerHaptic = [](void* context, const cxrHapticFeedback* haptic)
     {
         return reinterpret_cast<CloudXRClientOVR*>(context)->TriggerHaptic(haptic);
     };
-    clientProxy.RenderAudio = [](void* context, const cxrAudioFrame *audioFrame)
+    s_clientProxy.RenderAudio = [](void* context, const cxrAudioFrame *audioFrame)
     {
         return reinterpret_cast<CloudXRClientOVR*>(context)->RenderAudio(audioFrame);
     };
 
     // the client_lib calls into here when the async connection status changes
-    clientProxy.UpdateClientState = [](void* context, cxrClientState state, cxrStateReason reason)
+    s_clientProxy.UpdateClientState = [](void* context, cxrClientState state, cxrError error)
     {
         switch (state)
         {
             case cxrClientState_ConnectionAttemptInProgress:
-                ALOGE("Connection attempt in progress..."); // log as error for visibility.
+                CXR_LOGI("Connection attempt in progress.");
                 break;
             case cxrClientState_StreamingSessionInProgress:
-                ALOGE("Async connection succeeded."); // log as error for visibility.
+                CXR_LOGI("Connection attempt succeeded.");
                 break;
             case cxrClientState_ConnectionAttemptFailed:
-                ALOGE("Connection attempt failed. [%i]", reason);
+                CXR_LOGE("Connection attempt failed with error: %s", cxrErrorString(error));
                 break;
             case cxrClientState_Disconnected:
-                ALOGE("Server disconnected with reason: [%s]", StateReasonEnumToString(reason));
+                CXR_LOGE("Server disconnected with error: %s", cxrErrorString(error));
                 break;
             default:
-                ALOGV("Client state updated: %s, reason: %s", ClientStateEnumToString(state), StateReasonEnumToString(reason));
+                CXR_LOGI("Client state updated: %s, error: %s", ClientStateEnumToString(state), cxrErrorString(error));
                 break;
         }
 
         // update the state of the app, don't perform any actions here
         // the client state change will be handled in the render thread (UpdateClientState())
-        reinterpret_cast<CloudXRClientOVR*>(context)->mClientState = state;
-        reinterpret_cast<CloudXRClientOVR*>(context)->mClientStateReason = reason;
+        CloudXRClientOVR *client = reinterpret_cast<CloudXRClientOVR*>(context);
+        client->mClientState = state;
+        client->mClientError = error;
     };
+
+    s_clientProxy.LogMessage = [](void* context, cxrLogLevel level, cxrMessageCategory category, void* extra, const char* tag, const char* const messageText)
+    {
+        // Here we call our helper fn to output same way as the log macros will.
+        // note that at the moment, we don't need/use the client context.
+        dispatchLogMsg(level, category, extra, tag, messageText);
+    };
+
+    // context is now IN the callback struct.
+    s_clientProxy.clientContext = this;
 
     cxrReceiverDesc desc = { 0 };
     desc.requestedVersion = CLOUDXR_VERSION_DWORD;
     desc.deviceDesc = mDeviceDesc;
-    desc.clientCallbacks = clientProxy;
-    desc.clientContext = this;
+    desc.clientCallbacks = s_clientProxy;
     desc.shareContext = &context;
-    desc.numStreams = 2;
-    desc.receiverMode = cxrStreamingMode_XR;
     desc.debugFlags = GOptions.mDebugFlags;
-    if(mTargetDisplayRefresh > 72.0f)
-    {
-        desc.debugFlags |= cxrDebugFlags_EnableAImageReaderDecoder;
-    }
     desc.logMaxSizeKB = CLOUDXR_LOG_MAX_DEFAULT;
     desc.logMaxAgeDays = CLOUDXR_LOG_MAX_DEFAULT;
+    strncpy(desc.appOutputPath, mAppOutputPath.c_str(), CXR_MAX_PATH - 1);
+    desc.appOutputPath[CXR_MAX_PATH-1] = 0; // ensure null terminated if string was too long.
 
     cxrError err = cxrCreateReceiver(&desc, &Receiver);
     if (err != cxrError_Success)
     {
-        ALOGE("Failed to create CloudXR receiver. Error %d, %s.", err, cxrErrorString(err));
+        CXR_LOGE("Failed to create CloudXR receiver. Error %d, %s.", err, cxrErrorString(err));
         return err;
     }
 
     // else, good to go.
-    ALOGV("Receiver created!");
+    CXR_LOGI("Receiver created!");
 
     mConnectionDesc.async = cxrTrue;
-    mConnectionDesc.maxVideoBitrateKbps = GOptions.mMaxVideoBitrate;
+    mConnectionDesc.useL4S = GOptions.mUseL4S;
     mConnectionDesc.clientNetwork = GOptions.mClientNetwork;
     mConnectionDesc.topology = GOptions.mTopology;
     err = cxrConnect(Receiver, GOptions.mServerIP.c_str(), &mConnectionDesc);
@@ -593,7 +620,7 @@ cxrError CloudXRClientOVR::CreateReceiver()
     {
         if (err != cxrError_Success)
         {
-            ALOGE("Failed to connect to CloudXR server at %s. Error %d, %s.",
+            CXR_LOGE("Failed to connect to CloudXR server at %s. Error %d, %s.",
                   GOptions.mServerIP.c_str(), (int)err, cxrErrorString(err));
             TeardownReceiver();
             return err;
@@ -601,7 +628,7 @@ cxrError CloudXRClientOVR::CreateReceiver()
         else {
             mClientState = cxrClientState_StreamingSessionInProgress;
             mRenderState = RenderState_Running;
-            ALOGV("Receiver created for server: %s", GOptions.mServerIP.c_str());
+            CXR_LOGI("Receiver created for server: %s", GOptions.mServerIP.c_str());
         }
     }
 
@@ -624,8 +651,10 @@ void CloudXRClientOVR::TeardownReceiver() {
 
     if (Receiver) {
         cxrDestroyReceiver(Receiver);
-        Receiver = nullptr;
     }
+
+    Receiver = nullptr;
+    s_clientProxy = {0};
 }
 
 //-----------------------------------------------------------------------------
@@ -635,7 +664,7 @@ cxrError CloudXRClientOVR::QueryChaperone(cxrDeviceDesc* deviceDesc) const
 {
     if (mOvrSession == nullptr)
     {
-        ALOGE("OVR session is null, cannot continue.");
+        CXR_LOGE("OVR session is null, cannot continue.");
         return cxrError_Failed; // false..
     }
 
@@ -651,7 +680,7 @@ cxrError CloudXRClientOVR::QueryChaperone(cxrDeviceDesc* deviceDesc) const
     }
     else
     {
-        ALOGV("Cannot get play bounds, creating default.");
+        CXR_LOGI("Cannot get play bounds, creating default.");
         // should clear pose in case we use in the future.
         // for now, we fill in scale with fake/default values.
         scale.x = scale.z = 1.5f * 0.5f; // use 1.5m for now -- oculus stationary bounds are tight.
@@ -665,65 +694,57 @@ cxrError CloudXRClientOVR::QueryChaperone(cxrDeviceDesc* deviceDesc) const
     deviceDesc->chaperone.origin.m[2][0] = deviceDesc->chaperone.origin.m[2][1] = deviceDesc->chaperone.origin.m[2][3] = 0;
     deviceDesc->chaperone.playArea.v[0] = 2.f * scale.x;
     deviceDesc->chaperone.playArea.v[1] = 2.f * scale.z;
-    ALOGV("Setting play area to %0.2f x %0.2f", deviceDesc->chaperone.playArea.v[0], deviceDesc->chaperone.playArea.v[1]);
+    CXR_LOGI("Setting play area to %0.2f x %0.2f", deviceDesc->chaperone.playArea.v[0], deviceDesc->chaperone.playArea.v[1]);
 
     return cxrError_Success;
 }
 
 //-----------------------------------------------------------------------------
-// Here we try to determine what controllers are attached, what class of
-// device we are on.  First enumerate devices and look for Touch controllers,
-// and second check the system device type to detect Quest.
-// NOTE: still see some cases where BOTH checks fail.  TODO: debug further...
+// Note: here we try to detect controllers up-front.  We may need to do this
+// post-connect, if we don't detect any, or don't detect two.  Also note that
+// this code has removed all support for non Touch controllers and old devices.
 //-----------------------------------------------------------------------------
 void CloudXRClientOVR::DetectControllers()
 {
     // determine class of Oculus device
-    ControllersFound = false;
-    IsTouchController = true;
+    mControllersFound = 0;
     uint32_t deviceIndex = 0;
     ovrInputCapabilityHeader capsHeader;
-    while (vrapi_EnumerateInputDevices(mOvrSession, deviceIndex, &capsHeader) >= 0)
+    ovrResult result;
+
+    while (true)
     {
+        result = vrapi_EnumerateInputDevices(mOvrSession, deviceIndex, &capsHeader);
+        if (result != ovrSuccess)
+        {
+            CXR_LOGE("Failed to enumerate device %d, error = %d", deviceIndex, result);
+            break; // we're done if this call fails.
+        }
+        else
+        {
+            CXR_LOGE("Found device %d, type = 0x%0x", deviceIndex, capsHeader.Type);
+        }
         ++deviceIndex;
         if (capsHeader.Type == ovrControllerType_TrackedRemote)
         {
-            ControllersFound = true;
             ovrInputTrackedRemoteCapabilities remoteCaps;
             remoteCaps.Header = capsHeader;
             vrapi_GetInputDeviceCapabilities(mOvrSession, &remoteCaps.Header);
-            if (remoteCaps.ControllerCapabilities & ovrControllerCaps_ModelOculusGo  ||
-                remoteCaps.ControllerCapabilities & ovrControllerCaps_ModelGearVR)
+            if (remoteCaps.ControllerCapabilities & ovrControllerCaps_ModelOculusTouch)
             {
-                IsTouchController = false;
-                break; // one is enough for 'global' decisions.
+                mControllersFound++;
+                // TODO do we set up our internal state tracking of controllers here???
             }
         }
     }
 
-    if (!ControllersFound)
+    if (0==mControllersFound)
     {
-        ALOGE("No controllers identified!");
+        CXR_LOGE("No controllers identified!");
     }
     else
     {
-        ALOGV("Oculus controller type: %s", IsTouchController ? "Touch/Quest" : "Go/Gear - UNSUPPORTED");
-    }
-
-    // we'll also double-check for Touch controllers by checking for Quest device type
-    if (mJavaCtx.Vm == nullptr)
-    {
-        ALOGE("OVR Java context is null, cannot detect oculus device type..");
-    }
-    else
-    {
-        ovrDeviceType dtype = (ovrDeviceType) vrapi_GetSystemPropertyInt(&mJavaCtx, VRAPI_SYS_PROP_DEVICE_TYPE);
-        if ( (dtype >= VRAPI_DEVICE_TYPE_OCULUSQUEST_START && dtype <= VRAPI_DEVICE_TYPE_OCULUSQUEST_END) ||
-             (dtype >= VRAPI_DEVICE_TYPE_OCULUSQUEST2_START && dtype <= VRAPI_DEVICE_TYPE_OCULUSQUEST2_END) )
-        {
-            ALOGV("Identified that we're on Oculus Quest.");
-            IsTouchController = true;
-        }
+        CXR_LOGI("Found %d controllers", mControllersFound);
     }
 }
 
@@ -746,13 +767,13 @@ bool CloudXRClientOVR::SetupFramebuffer(GLuint colorTexture, uint32_t eye)
 
         if (status != GL_FRAMEBUFFER_COMPLETE)
         {
-            ALOGV("Incomplete frame buffer object!");
+            CXR_LOGI("Incomplete frame buffer object!");
             return false;
         }
 
         Framebuffers[eye] = framebuffer;
 
-        ALOGV("Created FBO %d for eye%d texture %d.",
+        CXR_LOGI("Created FBO %d for eye%d texture %d.",
             framebuffer, eye, colorTexture);
 
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, Framebuffers[eye]);
@@ -774,7 +795,7 @@ void CloudXRClientOVR::FillBackground()
 {
     float cr = ((mBGColor & 0x00FF0000) >> 16) / 255.0f;
     float cg = ((mBGColor & 0x0000FF00) >> 8) / 255.0f;
-    float cb = ((mBGColor & 0x000000FF) >> 255) / 255.0f;
+    float cb = ((mBGColor & 0x000000FF)) / 255.0f;
     float ca = ((mBGColor & 0xFF000000) >> 24) / 255.0f;
     glClearColor(cr, cg, cb, ca);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -782,265 +803,326 @@ void CloudXRClientOVR::FillBackground()
 
 
 //-----------------------------------------------------------------------------
-//
-//-----------------------------------------------------------------------------
-bool CloudXRClientOVR::setBooleanButton(cxrControllerTrackingState &ctl,
-                             const uint64_t &inBitfield, const OvrCxrButtonMapping &mapping)
+static constexpr int inputCountQuest = 21;
+
+static const char* inputPathsQuest[inputCountQuest] =
 {
-    const uint64_t prevComps = ctl.booleanComps;
-    const uint64_t btnMask = 1ULL << mapping.cxrId;
-    bool active = false;
+    "/input/system/click",
+    "/input/application_menu/click", // this is carried over from old system and might be remove, it's not a button binding, more action.
+    "/input/trigger/click",
+    "/input/trigger/touch",
+    "/input/trigger/value",
+    "/input/grip/click",
+    "/input/grip/touch",
+    "/input/grip/value",
+    "/input/joystick/click",
+    "/input/joystick/touch",
+    "/input/joystick/x",
+    "/input/joystick/y",
+    "/input/a/click",
+    "/input/b/click",
+    "/input/x/click", // Touch has X/Y on L controller, so we'll map the raw strings.
+    "/input/y/click",
+    "/input/a/touch",
+    "/input/b/touch",
+    "/input/x/touch",
+    "/input/y/touch",
+    "/input/thumb_rest/touch",
+};
 
-    // TODO: how to handle multiple ovr inputs mapping to the same cxr output!?!
-    if (inBitfield & mapping.ovrId)
-    {
-        ctl.booleanComps |= btnMask;
-        active = true;
-    }
-    else
-    {
-        ctl.booleanComps &= ~btnMask;
-    }
+cxrInputValueType inputValueTypesQuest[inputCountQuest] =
+{
+    cxrInputValueType_boolean, //input/system/click
+    cxrInputValueType_boolean, //input/application_menu/click
+    cxrInputValueType_boolean, //input/trigger/click
+    cxrInputValueType_boolean, //input/trigger/touch
+    cxrInputValueType_float32, //input/trigger/value
+    cxrInputValueType_boolean, //input/grip/click
+    cxrInputValueType_boolean, //input/grip/touch
+    cxrInputValueType_float32, //input/grip/value
+    cxrInputValueType_boolean, //input/joystick/click
+    cxrInputValueType_boolean, //input/joystick/touch
+    cxrInputValueType_float32, //input/joystick/x
+    cxrInputValueType_float32, //input/joystick/y
+    cxrInputValueType_boolean, //input/a/click
+    cxrInputValueType_boolean, //input/b/click
+    cxrInputValueType_boolean, //input/x/click
+    cxrInputValueType_boolean, //input/y/click
+    cxrInputValueType_boolean, //input/a/touch
+    cxrInputValueType_boolean, //input/b/touch
+    cxrInputValueType_boolean, //input/x/touch
+    cxrInputValueType_boolean, //input/y/touch
+    cxrInputValueType_boolean, //input/thumb_rest/touch
+};
 
-    if (prevComps != ctl.booleanComps)
-    {
-        // debug logging of state of button changes.
-#ifdef INPUT_LOGGING
-        ALOGV("#> btn %s [%d] state change %s {%x:%x}", mapping.nameStr, mapping.cxrId,
-                active ? "ACTIVE" : "inactive", (uint32_t)prevComps, ctl.booleanComps);
-#endif
-        return true; // we return true when button goes 'down' first frame
-    }
 
-    return false;
-}
+// we need a map of ovr button bit shift index (1<<n) to the
+// index into client input list, for quick conversions from
+// ovr -> cxr events.  Given the OVR Api is deprecated, these
+// items are constants, we can precompute the values.
+// since there's only 32b, an array[32] is fastest lookup by far.
+const int ovrBitsToInput[32] = { // ovr bit index -> client input index
+    12, // A
+    13, // B
+    -1, // not mapped
+    -1, // not mapped
+
+    -1, -1, -1, -1, //unused block
+
+    14, // X
+    15, // Y
+    -1, // not mapped
+    -1, // not mapped
+
+    -1, -1, -1, -1, //unused block
+
+    -1, // not mapped // up
+    -1, // not mapped // down
+    -1, // not mapped // left
+    -1, // not mapped // right
+
+    0, // ENTER, left controller menu button, => /input/system/click
+    -1, // not mapped
+    -1, // not mapped
+    -1, // n/a
+
+    -1, // n/a
+    -1, // n/a
+    5, // grip trigger
+    -1, // n/a
+
+    -1, // n/a
+    2, // index trigger
+    -1, // n/a
+    8, // joystick click
+};
+
+const int ovrTouchToInput[16] = { // ovr touch bit index -> client input index
+    16, // A
+    17, // B
+    18, // X
+    19, // Y
+
+    -1, // not mapped - trackpad
+    9, // stick (generic?)
+    3, // index trigger
+    -1, // n/a
+
+    -1, // thumb up, not near ABXY/Stick
+    -1, // index up, far enough from trigger to not be in proximity
+    -1, // left joystick
+    -1, // right joystick
+
+    -1, // thumb rest (generic?)
+    -1, // left thumb rest
+    -1, // left thumb rest
+    -1, // n/a
+};
+
 
 //-----------------------------------------------------------------------------
 //
 //-----------------------------------------------------------------------------
 void CloudXRClientOVR::ProcessControllers(float predictedTimeS)
 {
-    // these are Quest-specific button mappings
-    const static OvrCxrButtonMapping QuestLeftRemaps[] =
+    if (mClientState != cxrClientState_StreamingSessionInProgress)
     {
-        { ovrButton_Enter, cxrButton_System, "BtnSystem"},
-        { ovrButton_X, cxrButton_X, "BtnX" },
-        { ovrButton_Y, cxrButton_Y, "BtnY" },
-        { ovrButton_Trigger, cxrButton_Trigger_Click, "BtnTrig" },
-    };
+        // there might be a reason a given app wants to process the controllers regardless.
+        // such as if displaying local UI pre-connection.
+        // in our case, we're either connected, or we're not, if we're not we need no input.
+        return;
+    }
 
-    const static OvrCxrButtonMapping QuestRightRemaps[] =
-    {
-        { ovrButton_A, cxrButton_A, "BtnA" },
-        { ovrButton_B, cxrButton_B, "BtnB" },
-        { ovrButton_Trigger, cxrButton_Trigger_Click, "BtnTrig" },
-    };
+    // 64 should be more than large enough. 2x32b masks that are < half used, plus scalars.
+    cxrControllerEvent events[MAX_CONTROLLERS][64] = {};
+    uint32_t eventCount[MAX_CONTROLLERS] = {};
 
-    // these are Go/GearVR-specific button mappings
-    const static OvrCxrButtonMapping GoGearButtonRemaps[] =
-    {
-        { ovrButton_Trigger, cxrButton_Trigger_Click, "BtnTrig" },
-        // we don't do _Enter here as we do custom/manual handling of touchpad.
-    };
-
-    // For 3dof controllers, we will remap 'dpad' side press of touchpad to extra functions
-    const static OvrCxrButtonMapping GoGearExtraRemaps[] =
-    {
-        // Note that Go/Gear generate Enter for touchpad press
-        { ovrButton_Enter, cxrButton_Touchpad_Click, "BtnENTER(GoTouch)->Touch"},
-        { ovrButton_Up, cxrButton_System, "BtnUP->System" },
-        { ovrButton_Down, cxrButton_Grip_Click, "BtnDOWN->Grip" },
-#ifdef OVERRIDE_DPAD_LR
-        { ovrButton_Right, cxrButton_A, "BtnRIGHT->A" },
-        { ovrButton_Left, cxrButton_B, "BtnLEFT->B" },
-#endif
-};
-
-    // these are mappings referenced BY INDEX for manual remap logic
-    const static OvrCxrButtonMapping OCExtraRemaps[] =
-    {
-        { ovrTouch_IndexTrigger, cxrButton_Trigger_Touch, "TouchTrig" },
-        { ovrTouch_Joystick, cxrButton_Joystick_Touch, "TouchJoy" },
-        { ovrButton_Joystick, cxrButton_Joystick_Click, "BtnJoy" },
-        { ovrTouch_TrackPad, cxrButton_Touchpad_Touch, "TouchTrack" },
-        { ovrButton_GripTrigger, cxrButton_Grip_Click, "BtnGrip" },
-
-        // possible future mappings
-        //{ ovrTouch_IndexPointing, cxrButton_SteamVR_Trigger_Touch ???, "TouchGrip" },
-    };
-
-    const float A2D_PRESSED = 0.4f; // scalar value at which to set digital button 'pressed'
-
-    uint32_t deviceIndex = 0;
+    uint32_t deviceIndex = 0, controllerIndex = 0;
     ovrInputCapabilityHeader capsHeader;
     while (vrapi_EnumerateInputDevices(mOvrSession, deviceIndex, &capsHeader) >= 0)
     {
         ++deviceIndex;
+        if (capsHeader.Type != ovrControllerType_TrackedRemote)
+            continue; // quick loop, rather than indenting all the rest of the fn.
 
-        if (capsHeader.Type == ovrControllerType_TrackedRemote)
+        // FIRST check capabilities, detect hand index
+        ovrInputTrackedRemoteCapabilities remoteCaps;
+        remoteCaps.Header = capsHeader;
+        vrapi_GetInputDeviceCapabilities(mOvrSession, &remoteCaps.Header);
+        const int32_t handIndex = (remoteCaps.ControllerCapabilities&ovrControllerCaps_RightHand)
+                                  ? 1 : 0;
+
+        // for the moment, we're hacking in the controller ADD here, first time we
+        // detect controller N available.  It's not a horrible solution, where devices
+        // can wake/sleep, and their API doesn't seem to have events/status for that.
+        // TODO: ensure we have some ID->index to keep linked when sleep.
+        if (!m_newControllers[handIndex]) // null, so open to create+add
         {
-            ovrInputTrackedRemoteCapabilities remoteCaps;
-            remoteCaps.Header = capsHeader;
-            vrapi_GetInputDeviceCapabilities(mOvrSession, &remoteCaps.Header);
-
-            ovrInputStateTrackedRemote input;
-            input.Header.ControllerType = capsHeader.Type;
-            if (vrapi_GetCurrentInputState(
-                    mOvrSession, capsHeader.DeviceID, &input.Header) < 0)
+            cxrControllerDesc desc = {};
+            //desc.id = capsHeader.DeviceID; // turns out this is NOT UNIQUE.  it's a fixed starting number, incremented, and thus devices can 'swap' IDs.
+            desc.id = handIndex; // so for now, we're going to just use handIndex, as we're guaranteed left+right will remain 0+1 always.
+            desc.role = handIndex?"cxr://input/hand/right":"cxr://input/hand/left";
+            desc.controllerName = "Oculus Touch";
+            desc.inputCount = inputCountQuest;
+            desc.inputPaths = inputPathsQuest;
+            desc.inputValueTypes = inputValueTypesQuest;
+            CXR_LOGI("Adding controller index %u, ID %llu, role %s", handIndex, desc.id, desc.role);
+            CXR_LOGI("Controller caps bits = 0x%08x", capsHeader.DeviceID, remoteCaps.ControllerCapabilities);
+            cxrError e = cxrAddController(Receiver, &desc, &m_newControllers[handIndex]);
+            if (e!=cxrError_Success)
             {
+                CXR_LOGE("Error adding controller: %s", cxrErrorString(e));
+                // TODO!!! proper example for client to handle client-call errors, fatal vs 'notice'.
                 continue;
             }
-
-            // Unless the predicted time is used, tracking state will not
-            // be filtered and as a result view will be jumping
-            // all over the place.
-            ovrTracking tracking;
-            if (vrapi_GetInputTrackingState(
-                    mOvrSession, capsHeader.DeviceID, predictedTimeS, &tracking) < 0)
-            {
-                continue;
-            }
-
-            auto& controller = TrackingState.controller[
-                    (remoteCaps.ControllerCapabilities&ovrControllerCaps_LeftHand)
-                            ? cxrController_Left : cxrController_Right];
-
-            // Rotate the orientation of the controller to match the Quest pose with the Touch SteamVR model
-            const float QUEST_TO_TOUCH_ROT = 0.45f; // radians
-            controller.pose = ConvertPose(tracking.HeadPose, QUEST_TO_TOUCH_ROT);
-
-            controller.pose.deviceIsConnected = cxrTrue;
-            controller.pose.trackingResult = cxrTrackingResult_Running_OK;
-
-            // stash current state of booleanComps, to evaluate at end of fn for changes
-            // in state this frame.
-            const uint64_t priorCompsState = controller.booleanComps;
-
-            // clear changed flags for this pass
-            controller.booleanCompsChanged = 0;
-
-            // Handle ALL the button remaps in one quick loop up front, in case further
-            // code wants to override any values.
-            if (remoteCaps.ControllerCapabilities&ovrControllerCaps_ModelOculusTouch)
-            {
-                if (remoteCaps.ControllerCapabilities&ovrControllerCaps_LeftHand)
-                    for (auto &mapping : QuestLeftRemaps)
-                    {
-                        if (mapping.cxrId == cxrButton_Num) continue;
-                        setBooleanButton(controller, input.Buttons, mapping);
-                    }
-                else
-                    for (auto &mapping : QuestRightRemaps)
-                    {
-                        if (mapping.cxrId == cxrButton_Num) continue;
-                        setBooleanButton(controller, input.Buttons, mapping);
-                    }
-            }
-            else
-            {
-                for (auto &mapping : GoGearButtonRemaps)
-                {
-                    if (mapping.cxrId == cxrButton_Num) continue;
-                    setBooleanButton(controller, input.Buttons, mapping);
-                }
-            }
-
-            // Analog trigger gets passed through direct
-            if (remoteCaps.ControllerCapabilities&ovrControllerCaps_HasAnalogIndexTrigger)
-            { // Quest case essentially.
-                controller.scalarComps[cxrAnalog_Trigger] = input.IndexTrigger;
-                setBooleanButton(controller, input.Touches, OCExtraRemaps[0]);
-            }
-            else
-            { // 3dof digital trigger, we fake scalar as for 3dofs we emulate vive
-                if (controller.booleanComps & (1ULL << cxrButton_Trigger_Click))
-                    controller.scalarComps[cxrAnalog_Trigger] = 1.0f;
-                else
-                    controller.scalarComps[cxrAnalog_Trigger] = 0.0f;
-            }
-
-            // Analog grip trigger gets passed through direct, button click handled already.
-            if (remoteCaps.ControllerCapabilities&ovrControllerCaps_HasAnalogGripTrigger)
-            {
-                controller.scalarComps[cxrAnalog_Grip] = input.GripTrigger;
-            }
-            // else digital button already handled.
-
-            // go/gear 3dof trackpad handling
-            if (remoteCaps.ControllerCapabilities&ovrControllerCaps_HasTrackpad)
-            {
-                // remap touch from ovr coord to -1,1 expected vector, flip Y axis, to match vive
-                float x = (2.f*input.TrackpadPosition.x/static_cast<float>(remoteCaps.TrackpadMaxX)) - 1.f;
-                float y = 1.f - (2.f*input.TrackpadPosition.y/static_cast<float>(remoteCaps.TrackpadMaxY));
-                controller.scalarComps[cxrAnalog_TouchpadX] = x;
-                controller.scalarComps[cxrAnalog_TouchpadY] = y;
-                // Pass along 'touched' status
-                setBooleanButton(controller, input.Touches, OCExtraRemaps[3]);
-
-                if (!GOptions.mBtnRemap)
-                {
-                    // if button remaps disables, just handle main touchpad-click
-                    setBooleanButton(controller, input.Buttons, GoGearExtraRemaps[0]);
-                }
-                else
-                {
-                    // For 3dof remotes, we look at touchpad position, and remap side clicks (as Enter)
-                    // to 'dpad' events, but leave center area clicks as normal (Enter) press.
-                    uint64_t fakemask = input.Buttons;
-                    // clear all the button states, will set them again as determined below.
-                    fakemask &= ~(ovrButton_Enter & ovrButton_Up & ovrButton_Down &
-                                  ovrButton_Right & ovrButton_Left);
-                    const float TOUCH_DPAD_CUTOFF = 0.55f; // esp needed for how thumb covers touchpad
-                    if (input.Buttons & ovrButton_Enter)
-                    {
-                        if (x > TOUCH_DPAD_CUTOFF || x < -TOUCH_DPAD_CUTOFF ||
-                            y > TOUCH_DPAD_CUTOFF || y < -TOUCH_DPAD_CUTOFF)
-                        {
-                            if (fabs(y) > fabs(x)) // handle up/down
-                            {
-                                if (y > 0) fakemask |= ovrButton_Up;
-                                else fakemask |= ovrButton_Down;
-                            }
-                            else // handle right/left
-                            {
-#ifdef OVERRIDE_DPAD_LR
-                                if (x>0) fakemask |= ovrButton_Right;
-                                else fakemask |= ovrButton_Left;
-#else
-                                fakemask |= ovrButton_Enter;
-#endif
-                            }
-                        }
-                        else
-                            fakemask |= ovrButton_Enter;
-                    }
-
-                    // Then we apply GoGearExtraRemaps to remap the above-generated buttons into
-                    // specific functionality using remap bindings set at top of fn.
-                    for (auto &mapping : GoGearExtraRemaps)
-                    {
-                        if (setBooleanButton(controller, fakemask, mapping))
-                        {
-#ifdef DEBUG_LOGGING
-                            ALOGV("###> @ %0.2f, %0.2f", x, y);
-#endif
-                        }
-                    }
-                }
-            }
-            else // we assume either trackpad OR joystick right now.
-            if (remoteCaps.ControllerCapabilities&ovrControllerCaps_HasJoystick)
-            { // pass joystick position, touch, press through as-is.
-                controller.scalarComps[cxrAnalog_JoystickX] = input.Joystick.x;
-                controller.scalarComps[cxrAnalog_JoystickY] = input.Joystick.y;
-
-                setBooleanButton(controller, input.Touches, OCExtraRemaps[1]);
-                setBooleanButton(controller, input.Buttons, OCExtraRemaps[2]);
-            }
-
-            // update changed flags based on change in comps, as XOR of prior state and new state.
-            controller.booleanCompsChanged = priorCompsState ^ controller.booleanComps;
         }
+
+        // SECOND handle pose/tracking, to get it out of the way of input events...
+        // Must use predicted time or tracking will not be filtered and will jitter/jump
+        ovrTracking tracking;
+        if (vrapi_GetInputTrackingState(
+                mOvrSession, capsHeader.DeviceID, predictedTimeS, &tracking) < 0)
+        {
+            CXR_LOGE("vrapi_GetInputTrackingState failed, index %u", deviceIndex-1);
+            // TODO: maybe mark this as remove controller, or controller-sleep?
+            //  may need to review error codes....
+            continue;
+        }
+
+        auto& controller = TrackingState.controller[handIndex];
+
+        // Rotate the orientation of the controller to match the Quest pose with the Touch SteamVR model
+        const float QUEST_TO_TOUCH_ROT = 0.45f; // radians
+        controller.pose = ConvertPose(tracking.HeadPose, QUEST_TO_TOUCH_ROT);
+
+        // TODO tracking.status has a bunch of flags to inform active state.
+        controller.pose.deviceIsConnected = cxrTrue;
+        controller.pose.trackingResult = cxrTrackingResult_Running_OK;
+        controller.pose.poseIsValid = cxrTrue;
+        // TODO trackingState->hmd.activityLevel = cxrDeviceActivityLevel_UserInteraction;
+
+        // Done with tracking/pose.
+
+        // THIRD, we grab the current input state, and then we'll compare against
+        // prior state and generate any events we need to pass to server.
+        ovrInputStateTrackedRemote input;
+        input.Header.ControllerType = capsHeader.Type;
+        if (vrapi_GetCurrentInputState(
+                mOvrSession, capsHeader.DeviceID, &input.Header) < 0)
+        {
+            CXR_LOGE("vrapi_GetCurrentInputState failed, index %u", deviceIndex-1);
+            // TODO: maybe mark this as remove controller, or controller-sleep?
+            //  may need to review error codes....
+            continue;
+        }
+
+        const uint64_t inputTimeNS = GetTimeInNS();
+
+        // Let's deal with the scalars up front, since we know what they are.
+        // TODO: we could use a compare fn here to filter out tiny changes,
+        //  but then we'd need to track value last time we sent events...
+        if (input.IndexTrigger != mLastInputState[handIndex].IndexTrigger)
+        {
+            cxrControllerEvent& e = events[handIndex][eventCount[handIndex]++];
+            e.clientTimeNS = inputTimeNS;
+            e.clientInputIndex = 4;
+            e.inputValue.valueType = cxrInputValueType_float32;
+            e.inputValue.vF32 = input.IndexTrigger;
+        }
+
+        if (input.GripTrigger != mLastInputState[handIndex].GripTrigger)
+        {
+            cxrControllerEvent& e = events[handIndex][eventCount[handIndex]++];
+            e.clientTimeNS = inputTimeNS;
+            e.clientInputIndex = 7;
+            e.inputValue.valueType = cxrInputValueType_float32;
+            e.inputValue.vF32 = input.GripTrigger;
+        }
+
+        if (input.Joystick.x != mLastInputState[handIndex].Joystick.x)
+        {
+            cxrControllerEvent& e = events[handIndex][eventCount[handIndex]++];
+            e.clientTimeNS = inputTimeNS;
+            e.clientInputIndex = 10;
+            e.inputValue.valueType = cxrInputValueType_float32;
+            e.inputValue.vF32 = input.Joystick.x;
+        }
+
+        if (input.Joystick.y != mLastInputState[handIndex].Joystick.y)
+        {
+            cxrControllerEvent& e = events[handIndex][eventCount[handIndex]++];
+            e.clientTimeNS = inputTimeNS;
+            e.clientInputIndex = 11;
+            e.inputValue.valueType = cxrInputValueType_float32;
+            e.inputValue.vF32 = input.Joystick.y;
+        }
+
+        // okay, now the 'hard' part.  we need to loop through our static arrays
+        // of button and touch 'bindings', if value not -1 then test mask against
+        // 1<<i (position in array is position in mask...), and if that bit is set,
+        // value in array position is client input index.
+        // the button mask is 32 bits, the touches mask really is only 16 bits.
+
+        if (input.Buttons != mLastInputState[handIndex].Buttons)
+        { // quick check to see if any changes in mask since last time...
+            for (uint32_t i = 0; i < 32; i++)
+            {
+                const int32_t inputId = ovrBitsToInput[i];
+                if (inputId < 0) // means we don't bind that input
+                    continue;
+                // else we do bind that bit.  check current and prior value
+                bool bitset = (input.Buttons & (1 << i)) != 0;
+                bool oldbit = (mLastInputState[handIndex].Buttons & (1 << i)) != 0;
+                if (bitset != oldbit)
+                { // value changed, post an event.
+                    // prepare an event.
+                    //CXR_LOGV("Hand %d Btn %d Path %s", handIndex, i, inputPathsQuest[inputId]);
+                    cxrControllerEvent &e = events[handIndex][eventCount[handIndex]++];
+                    e.clientTimeNS = inputTimeNS;
+                    e.clientInputIndex = inputId;
+                    e.inputValue.valueType = cxrInputValueType_boolean;
+                    e.inputValue.vBool = bitset ? cxrTrue : cxrFalse;
+                }
+            }
+        }
+
+        // duplicate for touches.  we could make this a function/closure.
+        if (input.Touches != mLastInputState[handIndex].Touches)
+        { // quick check to see if any changes in mask since last time...
+            for (uint32_t i = 0; i < 16; i++) // !!! note change to 16.
+            {
+                if (ovrTouchToInput[i] < 0) // means we don't bind that touch
+                    continue;
+                // else we do bind that touch.  check current and prior value
+                bool bitset = (input.Touches & (1 << i)) != 0;
+                bool oldbit = (mLastInputState[handIndex].Touches & (1 << i)) != 0;
+                if (bitset != oldbit)
+                { // value changed, post an event.
+                    // prepare an event.
+                    cxrControllerEvent &e = events[handIndex][eventCount[handIndex]++];
+                    e.clientTimeNS = inputTimeNS;
+                    e.clientInputIndex = ovrTouchToInput[i];
+                    e.inputValue.valueType = cxrInputValueType_boolean;
+                    e.inputValue.vBool = bitset ? cxrTrue : cxrFalse;
+                }
+            }
+        }
+
+        if (eventCount[handIndex])
+        {
+            cxrError err = cxrFireControllerEvents(Receiver, m_newControllers[handIndex], events[handIndex], eventCount[handIndex]);
+            if (err != cxrError_Success)
+            {
+                CXR_LOGE("cxrFireControllerEvents failed: %s", cxrErrorString(err));
+                // TODO: how to handle UNUSUAL API errors? might just return up.
+                throw("Error firing events"); // just to do something fatal until we can propagate and 'handle' it.
+            }
+            // save input state for easy comparison next time, ONLY if we sent the events...
+            mLastInputState[handIndex] = input;
+        }
+
+        // clear event count.
+        eventCount[handIndex] = 0;
     }
 }
 
@@ -1063,6 +1145,8 @@ cxrTrackedDevicePose CloudXRClientOVR::ConvertPose(
     cxrMatrixToVecQuat(&m, &pose.position, &pose.rotation);
     pose.velocity = cxrConvert(inPose.LinearVelocity);
     pose.angularVelocity = cxrConvert(inPose.AngularVelocity);
+    pose.acceleration = cxrConvert(inPose.LinearAcceleration);
+    pose.angularAcceleration = cxrConvert(inPose.AngularAcceleration);
 
     pose.poseIsValid = cxrTrue;
 
@@ -1072,11 +1156,13 @@ cxrTrackedDevicePose CloudXRClientOVR::ConvertPose(
 //-----------------------------------------------------------------------------
 //
 //-----------------------------------------------------------------------------
-void CloudXRClientOVR::DoTracking(float predictedTimeS)
+void CloudXRClientOVR::DoTracking(double predictedTimeS)
 {
     ProcessControllers(predictedTimeS);
 
     ovrTracking2_ tracking = vrapi_GetPredictedTracking2(mOvrSession, predictedTimeS);
+
+    TrackingState.poseTimeOffset = ClientPredictionOffset;
 
     TrackingState.hmd.ipd = vrapi_GetInterpupillaryDistance(&tracking);
     // the quest2 ipd sensor reports infinitesimal changes every frame, even when the user has not adjusted the headset IPD
@@ -1098,6 +1184,7 @@ void CloudXRClientOVR::DoTracking(float predictedTimeS)
     TrackingState.hmd.pose.poseIsValid = ((tracking.Status & VRAPI_TRACKING_STATUS_ORIENTATION_VALID) > 0) ? cxrTrue : cxrFalse;
     TrackingState.hmd.pose.deviceIsConnected = ((tracking.Status & VRAPI_TRACKING_STATUS_HMD_CONNECTED) > 0) ? cxrTrue : cxrFalse;
     TrackingState.hmd.pose.trackingResult = cxrTrackingResult_Running_OK;
+    TrackingState.hmd.activityLevel = cxrDeviceActivityLevel_UserInteraction;
 }
 
 //-----------------------------------------------------------------------------
@@ -1105,9 +1192,13 @@ void CloudXRClientOVR::DoTracking(float predictedTimeS)
 //-----------------------------------------------------------------------------
 void CloudXRClientOVR::GetTrackingState(cxrVRTrackingState* trackingState)
 {
+    // TODO TBD!!! we used to use null to do the ovr api calls on loading/exiting screens
+    //  but that generates events and state changes the system isn't expecting.  so return for now.
+    if (nullptr==trackingState) return; // TODO see if any issues not processing tracking.
+
     // Unless the predicted time is used, tracking state will not be
     // filtered and as a result view will be jumping all over the place.
-    const double predictedTimeS = GetTimeInSeconds() + 0.004f;
+    const double predictedTimeS = ClientPredictionOffset == 0.0 ? 0.0 : GetTimeInSeconds() + ClientPredictionOffset;
     // TODO: look into replacing this with mNextDisplayTime so tracking closer to real scanout
 
     DoTracking(predictedTimeS);
@@ -1123,11 +1214,9 @@ cxrDeviceDesc CloudXRClientOVR::GetDeviceDesc(float fovX, float fovY)
     cxrDeviceDesc desc = {};
     if (mJavaCtx.Vm == nullptr)
     {
-        ALOGE("Java context is null.");
+        CXR_LOGE("Java context is null.");
         return desc;
     }
-
-    desc.deliveryType = cxrDeliveryType_Stereo_RGB;
 
     int texW = vrapi_GetSystemPropertyInt( &mJavaCtx, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_WIDTH );
     int texH = vrapi_GetSystemPropertyInt( &mJavaCtx, VRAPI_SYS_PROP_SUGGESTED_EYE_TEXTURE_HEIGHT );
@@ -1137,7 +1226,7 @@ cxrDeviceDesc CloudXRClientOVR::GetDeviceDesc(float fovX, float fovY)
     // get the rate the system is running at right now.
     // TODO: should this be a Float property??
     const int currDisplayRefresh = vrapi_GetSystemPropertyInt( &mJavaCtx, VRAPI_SYS_PROP_DISPLAY_REFRESH_RATE );
-    ALOGV("System property says current display refresh set to %d", currDisplayRefresh);
+    CXR_LOGI("System property says current display refresh set to %d", currDisplayRefresh);
 
     // TODO: atm we ignore current rate, and use a hardcoded default (72hz)
     // TODO: we may want to switch this to assign currDisplayRefresh instead, as that might be 90 at some point...
@@ -1145,7 +1234,7 @@ cxrDeviceDesc CloudXRClientOVR::GetDeviceDesc(float fovX, float fovY)
 
     if (GOptions.mRequestedRefreshRate <= 0.0f)
     { // leave as default for now
-        ALOGV("Override for display refresh not specified, so defaulting to %0.2f", mTargetDisplayRefresh);
+        CXR_LOGI("Override for display refresh not specified, so defaulting to %0.2f", mTargetDisplayRefresh);
         // TODO: we may down the line want to use this case to clamp to something other than mRequested/cDefault.
         //  for example, if no override given, maybe we should try to set to current?
     }
@@ -1169,14 +1258,14 @@ cxrDeviceDesc CloudXRClientOVR::GetDeviceDesc(float fovX, float fovY)
         //  might not work.  Might need to stash the floating point value we 'matched' for future reference at minimum.
         if (numRates >= 1) // try to find a matching rate to launch option
         {
-            ALOGE("Launch options requested display refreh of %u, checking list of %d available rates",
+            CXR_LOGE("Launch options requested display refreh of %u, checking list of %d available rates",
                   (GOptions.mRequestedRefreshRate), numRates);
 
             // for debugging, we'll print the list of supportedRates
-            ALOGV("Display support rates of:");
+            CXR_LOGI("Display support rates of:");
             for (auto rate : supportedRates)
             {
-                ALOGV("Refresh = %0.2f hz", rate);
+                CXR_LOGI("Refresh = %0.2f hz", rate);
             }
 
             // then we loop through the rate list to find something 'close enough' (less than 1hz from request).
@@ -1186,7 +1275,7 @@ cxrDeviceDesc CloudXRClientOVR::GetDeviceDesc(float fovX, float fovY)
                 if (abs(rate - (float)(GOptions.mRequestedRefreshRate)) < 1.0f)
                 { // found what we wanted -- update variable.
                     mTargetDisplayRefresh = rate;
-                    ALOGE("Choosing closest display rate of %0.2f", rate);
+                    CXR_LOGE("Choosing closest display rate of %0.2f", rate);
                     break;
                 }
             }
@@ -1195,64 +1284,71 @@ cxrDeviceDesc CloudXRClientOVR::GetDeviceDesc(float fovX, float fovY)
 
     if (mOvrSession == nullptr)
     {
-        ALOGE("OVR session is null, cannot continue.");
+        CXR_LOGE("OVR session is null, cannot continue.");
         return {}; // false..
     }
 
-    ALOGV("Setting display rate to %0.2f hz.", mTargetDisplayRefresh);
+    CXR_LOGI("Setting display rate to %0.2f hz.", mTargetDisplayRefresh);
     ovrResult result = vrapi_SetDisplayRefreshRate(mOvrSession, mTargetDisplayRefresh);
     if (result != ovrSuccess)
     {
         // there are two known cases called out by the api header.
         if (result == ovrError_InvalidParameter) // rate not supported
         {
-            ALOGE("Unable to set display rate to 0.2f, unsupported rate.");
+            CXR_LOGE("Unable to set display rate to 0.2f, unsupported rate.");
         }
         else
         if (result == ovrError_InvalidOperation) // rate can't be set right now -- like low power mode
         {
-            ALOGE("Unable to set display rate to 0.2f at this time (may be in low power mode?)");
+            CXR_LOGE("Unable to set display rate to 0.2f at this time (may be in low power mode?)");
         }
 
         // I think the right thing here is to reset the member to default value...
         // TODO: reminder if we change to assigning current refresh, this line will want to match init code.
         mTargetDisplayRefresh = cDefaultDisplayRefresh;
     }
-    ALOGV("vrapi HMD Props, texture = %d x %d, display = %d x %d @ %0.2f", texW, texH, dispW, dispH, mTargetDisplayRefresh);
+    CXR_LOGI("vrapi HMD Props, texture = %d x %d, display = %d x %d @ %0.2f", texW, texH, dispW, dispH, mTargetDisplayRefresh);
 
 //#define DISP_RES_OCULUS_SUGGESTED
 #ifdef DISP_RES_OCULUS_SUGGESTED
     // This is using the suggested texture size for optimal perf per Oculus sdk design
-    desc.width = texW;
-    desc.height = texH;
+    uint32_t width = texW;
+    uint32_t height = texH;
 #else
     // TODO: This is trying to use display-native per eye w/h instead.
-    desc.width = dispW/2;
-    desc.height = dispH;
+    uint32_t width = dispW / 2;
+    uint32_t height = dispH;
 #endif
+
+    desc.numVideoStreamDescs = CXR_NUM_VIDEO_STREAMS_XR;
+    for (uint32_t i = 0; i < desc.numVideoStreamDescs; i++)
+    {
+        desc.videoStreamDescs[i].format = cxrClientSurfaceFormat_RGB;
+        desc.videoStreamDescs[i].width = width;
+        desc.videoStreamDescs[i].height = height;
+        desc.videoStreamDescs[i].fps = mTargetDisplayRefresh;
+        desc.videoStreamDescs[i].maxBitrate = GOptions.mMaxVideoBitrate;
+    }
+    desc.stereoDisplay = true;
 
     desc.maxResFactor = GOptions.mMaxResFactor;
 
-    const int maxWidth = (int)(desc.maxResFactor * (float)desc.width);
-    const int maxHeight = (int)(desc.maxResFactor * (float)desc.height);
-    ALOGV("HMD size requested as %d x %d, max %d x %d", desc.width, desc.height, maxWidth, maxHeight);
-
-    desc.fps = mTargetDisplayRefresh;
+    const int maxWidth = (int)(desc.maxResFactor * (float)width);
+    const int maxHeight = (int)(desc.maxResFactor * (float)height);
+    CXR_LOGI("HMD size requested as %d x %d, max %d x %d", width, height, maxWidth, maxHeight);
 
     // Get IPD from OVR API
     const double predictedDisplayTime = vrapi_GetPredictedDisplayTime( mOvrSession, 0 );
     const ovrTracking2 tracking = vrapi_GetPredictedTracking2( mOvrSession, predictedDisplayTime );
     desc.ipd = vrapi_GetInterpupillaryDistance(&tracking);
 
-    desc.predOffset = 0.02f;
+    desc.predOffset = ServerPredictionOffset;
     desc.receiveAudio = GOptions.mReceiveAudio;
     desc.sendAudio = GOptions.mSendAudio;
     desc.posePollFreq = 0;
     desc.disablePosePrediction = false;
     desc.angularVelocityInDeviceSpace = false;
     desc.foveatedScaleFactor = (GOptions.mFoveation < 100) ? GOptions.mFoveation : 0;
-    // if we have touch controller use Oculus type, else use Vive as more close to 3dof remotes
-    desc.ctrlType = IsTouchController ? cxrControllerType_OculusTouch : cxrControllerType_HtcVive;
 
     const float halfFOVTanX = tanf(VRAPI_PI/360.f * fovX);
     const float halfFOVTanY = tanf(VRAPI_PI/360.f * fovY);
@@ -1266,6 +1362,7 @@ cxrDeviceDesc CloudXRClientOVR::GetDeviceDesc(float fovX, float fovY)
     desc.proj[1][2] = -halfFOVTanY;
     desc.proj[1][3] =  halfFOVTanY;
     QueryChaperone(&desc);
+
     return desc;
 }
 
@@ -1274,7 +1371,9 @@ cxrDeviceDesc CloudXRClientOVR::GetDeviceDesc(float fovX, float fovY)
 //-----------------------------------------------------------------------------
 void CloudXRClientOVR::RecreateSwapchain(uint32_t width, uint32_t height, uint32_t eye)
 {
-    ALOGV("Recreating swapchain for eye%d: %d x %d (was %d x %d)",
+    // TODO: this log should likely be Warning level, as this is expensive and we should
+    //   see clearly in log when it happens.  Don't think it needs to be Error, but will for now.
+    CXR_LOGE("Recreating swapchain for eye%d: %d x %d (was %d x %d)",
           eye, width, height, EyeWidth[eye], EyeHeight[eye]);
 
     if (SwapChains[eye])
@@ -1311,23 +1410,13 @@ void CloudXRClientOVR::TriggerHaptic(
             remoteCaps.Header = capsHeader;
             vrapi_GetInputDeviceCapabilities(mOvrSession, &remoteCaps.Header);
 
-            if (remoteCaps.ControllerCapabilities&ovrControllerCaps_LeftHand &&
-                    haptic.controllerIdx == cxrController_Right)
-            {
+            // now we simply compare the physical controller ID.
+            if (haptic.deviceID != capsHeader.DeviceID)
                 continue;
-            }
 
-            if (remoteCaps.ControllerCapabilities&ovrControllerCaps_RightHand &&
-                    haptic.controllerIdx == cxrController_Left)
-            {
+            // and of course, sanity check this device HAS haptic support...
+            if (0 == (remoteCaps.ControllerCapabilities & ovrControllerCaps_HasBufferedHapticVibration))
                 continue;
-            }
-
-            if (0 == (remoteCaps.ControllerCapabilities&
-                    ovrControllerCaps_HasBufferedHapticVibration))
-            {
-                continue;
-            }
 
             ovrHapticBuffer hapticBuffer;
             hapticBuffer.BufferTime = GetTimeInSeconds() + 0.03; // TODO: use mNextDisplayTime?
@@ -1393,7 +1482,6 @@ void CloudXRClientOVR::RenderLoadScreen()
     iconLayer.Header.Flags |= VRAPI_FRAME_LAYER_FLAG_INHIBIT_SRGB_FRAMEBUFFER;
     const ovrLayerHeader2* layers[] = { &blackLayer.Header, &iconLayer.Header };
     SubmitLayers(layers, 2, VRAPI_FRAME_FLAG_FLUSH);
-
 }
 
 
@@ -1425,6 +1513,21 @@ void CloudXRClientOVR::Render()
     worldLayer.HeadPose = mLastHeadPose;
     worldLayer.Header.Flags |= VRAPI_FRAME_LAYER_FLAG_CHROMATIC_ABERRATION_CORRECTION;
 
+#if later
+    if (GOptions.mTestLatency)
+    {
+        // TODO: for this non-connected test mode, or any other local UX, we currently have
+        //  to manually call call GetTrackingState(null) to update input and hmd status -- as
+        //  current code only updates state during client callback when connected to server.
+        //  Future improvement would be to run update in a separate thread, and be able to copy
+        //  out those results for the callback or here.
+        if (testButtonPressed)
+            mBGColor = 0xFFFFFFFF;
+        else
+            mBGColor = mDefaultBGColor;
+    }
+#endif
+
     // Fetch a CloudXR frame
     cxrFramesLatched framesLatched;
     const uint32_t timeoutMs = 500;
@@ -1441,17 +1544,16 @@ void CloudXRClientOVR::Render()
             {
                 if (frameErr == cxrError_Frame_Not_Ready)
                 {
-                    ALOGV("LatchFrame failed, frame not ready for %d ms", timeoutMs);
+                    CXR_LOGI("LatchFrame failed, frame not ready for %d ms", timeoutMs);
                 }
-                else
-                if (frameErr == cxrError_Receiver_Not_Running)
+                else if (frameErr == cxrError_Not_Connected)
                 {
-                    ALOGE("LatchFrame: Receiver no longer running, exiting.");
+                    CXR_LOGE("LatchFrame failed, receiver no longer connected.");
                     RequestExit();
                 }
                 else
                 {
-                    ALOGE("Error in LatchFrame [%0d] = %s", frameErr, cxrErrorString(frameErr));
+                    CXR_LOGE("LatchFrame failed with error: %s", cxrErrorString(frameErr));
                 }
             }
         }
@@ -1545,7 +1647,7 @@ void CloudXRClientOVR::Render()
                 }
             }
 
-            ALOGV("%s    %s    %s", statsString, qualityString, reasonString);
+            CXR_LOGI("%s    %s    %s", statsString, qualityString, reasonString);
             mFramesUntilStats = (int)mStats.framesPerSecond * STATS_INTERVAL_SEC;
         }
     }
@@ -1562,7 +1664,7 @@ void CloudXRClientOVR::AppResumed()
 {
     if (mOvrSession == nullptr)
     {
-        ALOGE("OVR session is null, cannot continue.");
+        CXR_LOGE("OVR session is null, cannot continue.");
         RequestExit();
         return; // false..
     }
@@ -1580,7 +1682,7 @@ void CloudXRClientOVR::AppResumed()
     float EyeFovDegreesY = vrapi_GetSystemPropertyFloat(&mJavaCtx,
             VRAPI_SYS_PROP_SUGGESTED_EYE_FOV_DEGREES_Y);
 
-    ALOGV("Headset suggested FOV: %.1f x %.1f.", EyeFovDegreesX, EyeFovDegreesY);
+    CXR_LOGI("Headset suggested FOV: %.1f x %.1f.", EyeFovDegreesX, EyeFovDegreesY);
 
     const auto projectionMatrix = ovrMatrix4f_CreateProjectionFov(
             EyeFovDegreesX, EyeFovDegreesY, 0.0f, 0.0f, VRAPI_ZNEAR, 0.0f);
@@ -1590,17 +1692,21 @@ void CloudXRClientOVR::AppResumed()
 
     // get controller state and HMD state up-front now.
     DetectControllers();
+    // clear input history.  this might be messy if we paused in
+    // different state, but can't trust leaving and coming back
+    // and guaranteeing input historical status is 'static'.
+    memset(mLastInputState, 0, sizeof(mLastInputState));
     mDeviceDesc = GetDeviceDesc(EyeFovDegreesX, EyeFovDegreesY);
 
     // create the initial swapchain buffers based on HMD specs.
     for (int eye = 0; eye < VRAPI_FRAME_LAYER_EYE_MAX; eye++)
-        RecreateSwapchain(mDeviceDesc.width, mDeviceDesc.height, eye);
+        RecreateSwapchain(mDeviceDesc.videoStreamDescs[eye].width, mDeviceDesc.videoStreamDescs[eye].height, eye);
 
     // TODO: move this to a once-per-frame check like wvr sample does in its UpdatePauseLogic fn.
     if (!Receiver && mReadyToConnect &&
         CreateReceiver() != cxrError_Success)
     {
-        ALOGE("Failed to create the receiver, exiting...");
+        CXR_LOGE("Failed to create the receiver, exiting...");
         RequestExit();
         return;
     }
@@ -1617,7 +1723,6 @@ void CloudXRClientOVR::AppResumed()
 
     // now match variable state
     mWasPaused = mIsPaused;
-
 }
 
 //-----------------------------------------------------------------------------
@@ -1626,7 +1731,7 @@ void CloudXRClientOVR::AppResumed()
 void CloudXRClientOVR::AppPaused() {
     // TODO verify whether we need a mutex around resources here to ensure some thread isn't
     //  rendering actively while we're pausing...
-    ALOGV("App Paused");
+    CXR_LOGI("App Paused");
 
     for (int i = 0; i < NumEyes; ++i)
     {
@@ -1641,7 +1746,7 @@ void CloudXRClientOVR::AppPaused() {
         {
             mClientState = cxrClientState_ReadyToConnect;
             mRenderState = RenderState_Loading;
-            ALOGV("Receiver destroyed, client state reset.");
+            CXR_LOGI("Receiver destroyed, client state reset.");
         }
     }
 
@@ -1676,27 +1781,27 @@ bool CloudXRClientOVR::EnterVRMode()
         parms.Display = (size_t)(mEglHelper.GetDisplay());
         parms.ShareContext = (size_t)(mEglHelper.GetContext());
 
-        ALOGV("        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface(EGL_DRAW));
-        ALOGV("        vrapi_EnterVrMode()");
+        CXR_LOGI("        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface(EGL_DRAW));
+        CXR_LOGI("        vrapi_EnterVrMode()");
         mOvrSession = vrapi_EnterVrMode(&parms);
-        ALOGV("        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface(EGL_DRAW));
+        CXR_LOGI("        eglGetCurrentSurface( EGL_DRAW ) = %p", eglGetCurrentSurface(EGL_DRAW));
 
         // If entering VR mode failed then the ANativeWindow was not valid.
         if (mOvrSession == NULL) {
-            ALOGE("EnterVrMode failed, assuming invalid ANativeWindow (%p)!", GetWindow());
+            CXR_LOGE("EnterVrMode failed, assuming invalid ANativeWindow (%p)!", GetWindow());
             return false;
         }
 
         // Set performance parameters once we have entered VR mode and have a valid ovrMobile.
         if (mOvrSession != NULL) {
             vrapi_SetClockLevels(mOvrSession, CPU_LEVEL, GPU_LEVEL);
-            ALOGV("		vrapi_SetClockLevels( %d, %d )", CPU_LEVEL, GPU_LEVEL);
+            CXR_LOGI("		vrapi_SetClockLevels( %d, %d )", CPU_LEVEL, GPU_LEVEL);
 
             vrapi_SetPerfThread(mOvrSession, VRAPI_PERF_THREAD_TYPE_MAIN, gettid());
-            ALOGV("		vrapi_SetPerfThread( MAIN, %d )", gettid());
+            CXR_LOGI("		vrapi_SetPerfThread( MAIN, %d )", gettid());
 
 //            vrapi_SetPerfThread(mOvrSession, VRAPI_PERF_THREAD_TYPE_RENDERER, gettid());
-//            ALOGV("		vrapi_SetPerfThread( RENDERER, %d )", gettid());
+//            CXR_LOGI("		vrapi_SetPerfThread( RENDERER, %d )", gettid());
         }
     }
 
@@ -1717,7 +1822,7 @@ void CloudXRClientOVR::HandleVrModeChanges()
         if (!EnterVRMode())
         {
             // might need to notify user as well here.
-            ALOGE("Failed to enter VR mode, exiting...");
+            CXR_LOGE("Failed to enter VR mode, exiting...");
             RequestExit();
         }
         else
@@ -1732,7 +1837,7 @@ void CloudXRClientOVR::HandleVrModeChanges()
         {
             if (mOvrSession != NULL)
             {
-                ALOGV("HANDLE VR MODE CHANGES CALLING vrapi_LeaveVrMode()");
+                CXR_LOGI("CALLING vrapi_LeaveVrMode()");
                 vrapi_LeaveVrMode(mOvrSession);
                 mOvrSession = NULL;
             }
@@ -1773,20 +1878,20 @@ void CloudXRClientOVR::HandleVrApiEvents()
 
         switch (eventHeader->EventType) {
             case VRAPI_EVENT_DATA_LOST:
-                ALOGV("vrapi_PollEvent: Received VRAPI_EVENT_DATA_LOST");
+                CXR_LOGI("vrapi_PollEvent: Received VRAPI_EVENT_DATA_LOST");
                 break;
             case VRAPI_EVENT_VISIBILITY_GAINED:
-                ALOGV("vrapi_PollEvent: Received VRAPI_EVENT_VISIBILITY_GAINED");
+                CXR_LOGI("vrapi_PollEvent: Received VRAPI_EVENT_VISIBILITY_GAINED");
                 break;
             case VRAPI_EVENT_VISIBILITY_LOST:
-                ALOGV("vrapi_PollEvent: Received VRAPI_EVENT_VISIBILITY_LOST");
+                CXR_LOGI("vrapi_PollEvent: Received VRAPI_EVENT_VISIBILITY_LOST");
                 break;
             case VRAPI_EVENT_FOCUS_GAINED:
                 // FOCUS_GAINED is sent when the application is in the foreground and has
                 // input focus. This may be due to a system overlay relinquishing focus
                 // back to the application.
                 // TODO: to be implemented...
-                ALOGV("vrapi_PollEvent: Received VRAPI_EVENT_FOCUS_GAINED");
+                CXR_LOGI("vrapi_PollEvent: Received VRAPI_EVENT_FOCUS_GAINED");
                 break;
             case VRAPI_EVENT_FOCUS_LOST:
                 // FOCUS_LOST is sent when the application is no longer in the foreground and
@@ -1794,14 +1899,14 @@ void CloudXRClientOVR::HandleVrApiEvents()
                 // focus from the application. The application should take appropriate action when
                 // this occurs.
                 // TODO: to be implemented...
-                ALOGV("vrapi_PollEvent: Received VRAPI_EVENT_FOCUS_LOST");
+                CXR_LOGI("vrapi_PollEvent: Received VRAPI_EVENT_FOCUS_LOST");
                 break;
             case VRAPI_EVENT_DISPLAY_REFRESH_RATE_CHANGE:
             {
                 // TODO: consider if we should wrap with a mutex, unclear which thread things occur on, and changed flag wants to be protected.
                 ovrEventDisplayRefreshRateChange *rrc = reinterpret_cast<ovrEventDisplayRefreshRateChange*>(eventHeader);
-                ALOGV("vrapi_PollEvent: Received VRAPI_EVENT_DISPLAY_REFRESH_RATE_CHANGE");
-                ALOGV("Refresh changing from %0.2f to %0.2f", rrc->fromDisplayRefreshRate, rrc->toDisplayRefreshRate);
+                CXR_LOGI("vrapi_PollEvent: Received VRAPI_EVENT_DISPLAY_REFRESH_RATE_CHANGE");
+                CXR_LOGI("Refresh changing from %0.2f to %0.2f", rrc->fromDisplayRefreshRate, rrc->toDisplayRefreshRate);
                 // update the member as rate changed under the covers already.
                 mTargetDisplayRefresh = rrc->toDisplayRefreshRate;
                 // flag to system so next pose update includes this change
@@ -1810,12 +1915,12 @@ void CloudXRClientOVR::HandleVrApiEvents()
                 // get the rate the system thinks it is running at right now.
                 // TODO: should this be a Float property??
                 const int currDisplayRefresh = vrapi_GetSystemPropertyInt( &mJavaCtx, VRAPI_SYS_PROP_DISPLAY_REFRESH_RATE );
-                ALOGV("REFRESH CHANGED! API now returns display refresh as %d", currDisplayRefresh);
+                CXR_LOGI("REFRESH CHANGED! API now returns display refresh as %d", currDisplayRefresh);
 
                 break;
             }
             default:
-                ALOGV("vrapi_PollEvent: Unknown event");
+                CXR_LOGI("vrapi_PollEvent: Unknown event");
                 break;
         }
     }
@@ -1836,16 +1941,47 @@ Java_com_valiventures_cloudxr_ovr_MainActivity_nativeHandleLaunchOptions(JNIEnv*
     if (jcmdline != nullptr) {
         const char *utfstr = env->GetStringUTFChars(jcmdline, 0);
         if (utfstr != nullptr) {
-            ALOGV("Commandline received from Java: %s", utfstr);
+            CXR_LOGI("Commandline received from Java: %s", utfstr);
             cmdline = utfstr;
             env->ReleaseStringUTFChars(jcmdline, utfstr);
         }
     }
 
+    std::string optionsPath = gClientHandle->GetBasePath();
+    optionsPath.append("/CloudXRLaunchOptions.txt");
+    CXR_LOGI("Attempting to load launch options from: %s", optionsPath.c_str());
     // first, try to read "command line in a text file"
-    GOptions.ParseFile("/sdcard/CloudXRLaunchOptions.txt");
+    ParseStatus p = GOptions.ParseFile(optionsPath.c_str());
+    if (p != ParseStatus_Success)
+        CXR_LOGE("Unable to open launch options file, %s", strerror(errno));
     // next, process actual 'commandline' args -- overrides any prior values
     GOptions.ParseString(cmdline);
+
+    // For the moment, we prefer to set up logging as early as possible,
+    // and it depends upon options having been parsed.
+    // Set any logger options PRIOR to init call.
+    if (GOptions.mDebugFlags & cxrDebugFlags_LogQuiet) // quiet takes precedence
+        g_logFile.setLogLevel(cxrLL_Silence);
+    else if (GOptions.mDebugFlags & cxrDebugFlags_LogVerbose)
+        g_logFile.setLogLevel(cxrLL_Verbose);
+    else
+        g_logFile.setLogLevel(cxrLL_Debug); // otherwise defaults to Info.
+
+    g_logFile.setPrivacyEnabled((GOptions.mDebugFlags & cxrDebugFlags_LogPrivacyDisabled) ? 0 : 1);
+    g_logFile.setMaxSizeKB(GOptions.mLogMaxSizeKB);
+    g_logFile.setMaxAgeDays(GOptions.mLogMaxAgeDays);
+
+    std::string filePrefix = "Oculus Sample";
+    g_logFile.init(gClientHandle->GetOutputPath(), filePrefix);
+
+    // if running local latency test, clear server IP so we don't try to connect.
+    if (GOptions.mTestLatency && !GOptions.mServerIP.empty())
+        GOptions.mServerIP.clear();
+
+    if (GOptions.mTestLatency)
+        gClientHandle->SetDefaultBGColor(0xFF000000); // black for now.
+    else
+        gClientHandle->SetDefaultBGColor(0xFF555555); // dark gray for now.
 
     // check if we have a server yet (if have no 'input UI', we have no other source)
     if (!GOptions.mServerIP.empty())
@@ -1854,9 +1990,12 @@ Java_com_valiventures_cloudxr_ovr_MainActivity_nativeHandleLaunchOptions(JNIEnv*
     }
     else
     {
-        // if we have no server, then we need to wait for input UI to provide one.
-        ALOGV("No server specified, waiting for input UI to provide one.");
-        return;
+        if (!GOptions.mTestLatency)
+        {
+            CXR_LOGE("No server IP specified to connect to.");
+            // TODO: until we have a VR UI, we should exit here and post system dialog somehow.
+            gClientHandle->RequestExit();
+        }
     }
 }
 
@@ -1884,8 +2023,13 @@ void android_main(struct android_app* app)
     gClientHandle = NULL;
     GAndroidApp = NULL;
 
+    CXR_LOGI("Finishing the NativeActivity.");
     ANativeActivity_finish(app->activity);
     // just return to native app glue, let it run destroy, activity finish does the rest.
+
+    CXR_LOGE("Exiting android_main, library is in limbo until process terminated.");
+
+    g_logFile.destroy(); // just making it explicit.
 
     // TODO: after return, app_destroy doesn't terminate the process.  we need to unload and
     //  reload native bits potentially -- or at least reset in constructors and watch statics.

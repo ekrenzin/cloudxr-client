@@ -1,7 +1,7 @@
 def OVR_SDK_ROOT = file("${buildDir}/ovr_sdk")
 def OBOE_SDK_ROOT = file("${buildDir}/Oboe")
 def CLOUDXR_SDK_ROOT = file("${buildDir}/CloudXR")
-def C_SHARED_INCLUDE = file("${project.rootDir}/../../shared")
+def C_SHARED_INCLUDE = file("${project.rootDir}/app/cxrUtils")
 
 android {
     defaultConfig {

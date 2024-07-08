@@ -91,7 +91,7 @@ class MainActivity : NativeActivity() {
         if (dvCLI != null) {
             nativeHandleLaunchOptions("$dvCLI -s $ip");
         } else {
-            nativeHandleLaunchOptions("-rrr 90 -f 50 -sa -s $ip")
+            nativeHandleLaunchOptions("-rrr 72 -f 50 -sa -s $ip")
         }
     }
 

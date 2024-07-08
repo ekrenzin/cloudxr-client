@@ -40,6 +40,8 @@
 
 #include "oboe/Oboe.h"
 
+#define MAX_CONTROLLERS  2
+
 //-----------------------------------------------------------------------------
 //
 //-----------------------------------------------------------------------------
@@ -47,6 +49,8 @@ class CloudXRClientOVR : public oboe::AudioStreamDataCallback
 {
     static constexpr uint32_t SwapChainLen = 3;
     static constexpr uint32_t NumEyes = 2;
+    static constexpr float ClientPredictionOffset = 0.0;
+    static constexpr float ServerPredictionOffset = 0.0;
     typedef std::unordered_map<GLuint, GLuint> FramebufferMap;
 
     typedef enum {
@@ -64,11 +68,17 @@ public:
     void SetWindow(ANativeWindow* win) { mNativeWindow = win; }
     ANativeWindow* GetWindow() { return mNativeWindow; }
 
+    std::string GetBasePath() { return mAppBasePath; }
+    std::string GetOutputPath() { return mAppOutputPath; }
+
     void SetReadyToConnect(bool ready) { mReadyToConnect = ready; }
     void SetDefaultBGColor(const uint32_t col) { mDefaultBGColor = col; }
 
     void SetPaused(bool p) { mIsPaused = p; }
     void RequestExit();
+
+    // have this a public status unless we decide to expose a getter method...
+    static cxrClientCallbacks s_clientProxy;
 
 private:
     void AppResumed();
@@ -107,19 +117,24 @@ private:
     void RenderExitScreen();
     void Render();
 
-    void DoTracking(float predictedTimeS);
+    void DoTracking(double predictedTimeS);
     cxrError QueryChaperone(cxrDeviceDesc* deviceDesc) const;
 
     void FillBackground();
 
 protected:
     CxrcRenderStates mRenderState = RenderState_Loading;
+    ovrInputStateTrackedRemote mLastInputState[MAX_CONTROLLERS] = {}; // cache prior state per controller.
     struct android_app *mAndroidApp = NULL;
     ANativeWindow *mNativeWindow = NULL;
     ovrJava mJavaCtx;
     EGLHelper mEglHelper;
     ovrMobile *mOvrSession = NULL; // pointer to oculus VrApi session object.
     uint64_t mFrameCounter = 0;
+    uint32_t mControllersFound = 0;
+
+    std::string mAppBasePath = "";
+    std::string mAppOutputPath = "";
 
     bool mRefreshChanged = false;
     float_t mTargetDisplayRefresh = 0;
@@ -135,8 +150,7 @@ protected:
     bool mReadyToConnect = false;
     bool mHeadsetOnHead = true;
 
-    bool ControllersFound = false;
-    bool IsTouchController = false;
+    cxrControllerHandle     m_newControllers[MAX_CONTROLLERS] = {};
 
     GLuint Framebuffers[NumEyes];
 
@@ -153,7 +167,7 @@ protected:
     cxrVRTrackingState TrackingState = {};
     cxrReceiverHandle Receiver = nullptr;
     cxrClientState mClientState = cxrClientState_ReadyToConnect;
-    cxrStateReason mClientStateReason = cxrStateReason_NoError;
+    cxrError mClientError = cxrError_Success;
     cxrDeviceDesc mDeviceDesc = {};
     cxrConnectionDesc mConnectionDesc = {};
     cxrConnectionStats mStats = {};
@@ -161,16 +175,6 @@ protected:
 
     uint32_t mDefaultBGColor = 0xFF000000; // black to start until we set around OnResume.
     uint32_t mBGColor = mDefaultBGColor;
-
-    struct OvrCxrButtonMapping
-    {
-        unsigned int ovrId;
-        cxrButtonId cxrId;
-        char nameStr[32];
-    };
-
-    bool setBooleanButton(cxrControllerTrackingState &ctl,
-                          const uint64_t &inBitfield, const OvrCxrButtonMapping &mapping);
 };
 
 #endif //CLIENT_APP_OVR_MAIN_H
